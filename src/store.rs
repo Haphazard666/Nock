@@ -2,6 +2,7 @@
 //!   config.ini  – a few switches
 //!   apps.txt    – pinned launcher entries, one per line:  Name|target|optional args
 //!   todos.txt   – the to-do list, one per line:           0|text   (1 = done)
+//!   stations.txt – radio favorites, one per line:  name|url_resolved|uuid|countrycode|codec|bitrate
 
 use std::fs;
 use std::path::PathBuf;
@@ -370,6 +371,87 @@ pub fn load_apps() -> Vec<AppEntry> {
         .collect()
 }
 
+// ---------------------------------------------------------- radio favorites
+
+/// A favorite radio station (Nock Radio). The station itself lives in `tuner.rs`.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Favorite {
+    pub name: String,
+    /// `url_resolved`: the URL that is played.
+    pub url: String,
+    pub uuid: String,
+    pub countrycode: String,
+    pub codec: String,
+    /// kbps; 0 = unknown.
+    pub bitrate: u32,
+}
+
+#[cfg(any(windows, test))]
+pub fn stations_path() -> PathBuf {
+    data_dir().join("stations.txt")
+}
+
+/// Read favorites. Comments, blank lines and lines without a name or an http(s) URL are
+/// skipped; missing trailing fields are empty, a bad bitrate is 0, a repeated URL is dropped.
+#[cfg(any(windows, test))]
+pub fn parse_favorites(text: &str) -> Vec<Favorite> {
+    let mut out: Vec<Favorite> = Vec::new();
+    for l in text.lines().map(str::trim) {
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = l.split('|').map(str::trim).collect();
+        let get = |i: usize| f.get(i).copied().unwrap_or("").to_string();
+        let (name, url) = (get(0), get(1));
+        let http = url.starts_with("http://") || url.starts_with("https://");
+        if name.is_empty() || !http || out.iter().any(|o| o.url == url) {
+            continue;
+        }
+        out.push(Favorite {
+            name,
+            url,
+            uuid: get(2),
+            countrycode: get(3),
+            codec: get(4),
+            bitrate: get(5).parse().unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// The text of stations.txt for these favorites.
+#[cfg(any(windows, test))]
+pub fn favorites_text(favs: &[Favorite]) -> String {
+    let clean = |s: &str| s.replace(['|', '\r', '\n'], " ").trim().to_string();
+    let mut text = String::from(
+        "# Nock Radio favorites. One per line:  name|url|uuid|countrycode|codec|bitrate\n# Use the star in the Radio tab, or edit this file.\n",
+    );
+    for f in favs {
+        text.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}\n",
+            clean(&f.name),
+            clean(&f.url),
+            clean(&f.uuid),
+            clean(&f.countrycode),
+            clean(&f.codec),
+            f.bitrate
+        ));
+    }
+    text
+}
+
+/// Favorites from %APPDATA%\Nock\stations.txt (none when the file is missing).
+#[cfg(any(windows, test))]
+pub fn load_favorites() -> Vec<Favorite> {
+    fs::read_to_string(stations_path()).map(|t| parse_favorites(&t)).unwrap_or_default()
+}
+
+#[cfg(any(windows, test))]
+pub fn save_favorites(favs: &[Favorite]) {
+    let _ = fs::write(stations_path(), favorites_text(favs));
+}
+
 // --------------------------------------------------------------- clipboard
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -563,5 +645,68 @@ mod pin_tests {
             assert!(!one_line.contains('\n') && !one_line.contains('\r'));
             assert_eq!(pin_unescape(&one_line), t);
         }
+    }
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+
+    fn fav(name: &str, url: &str, bitrate: u32) -> Favorite {
+        Favorite {
+            name: name.into(),
+            url: url.into(),
+            uuid: "96062a7b-0601-11e8-ae97-52543be04c81".into(),
+            countrycode: "US".into(),
+            codec: "AAC".into(),
+            bitrate,
+        }
+    }
+
+    #[test]
+    fn round_trip() {
+        let favs = vec![
+            fav("Radio Paradise", "http://stream-uk1.radioparadise.com/aac-320", 320),
+            fav("Armisa", "https://onair.armisa.it/radio.mp3", 0),
+            fav("Kan Bet \u{5db}\u{5df}", "https://example.com/kan?x=1&y=2", 64),
+        ];
+        assert_eq!(parse_favorites(&favorites_text(&favs)), favs);
+    }
+
+    #[test]
+    fn pipes_and_newlines_in_fields_cannot_break_lines() {
+        let text = favorites_text(&[fav("Bad|Name\nTwo", "https://a.example/s", 128)]);
+        assert_eq!(text.lines().filter(|l| !l.starts_with('#')).count(), 1);
+        let back = parse_favorites(&text);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].name, "Bad Name Two");
+        assert_eq!(back[0].url, "https://a.example/s");
+    }
+
+    #[test]
+    fn junk_lines_are_tolerated() {
+        let text = [
+            "# comment",
+            "garbage",
+            "|https://no.name/x",
+            "Only Name",
+            "Bad URL|ftp://x|u|US|MP3|128",
+            "   ",
+            "Good One|https://good.example/a|u1|de|MP3|128",
+            "Short|https://short.example/b",
+            "Bad Bitrate|https://br.example/c|u3|FR|AAC|lots",
+            "Too Many|https://many.example/d|u4|IT|MP3|96|extra|fields",
+            "Dupe|https://good.example/a|u5|DE|MP3|128",
+            "\r",
+        ]
+        .join("\r\n");
+        let f = parse_favorites(&text);
+        let names: Vec<&str> = f.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["Good One", "Short", "Bad Bitrate", "Too Many"]);
+        assert_eq!(f[0].countrycode, "de");
+        assert_eq!((f[1].uuid.as_str(), f[1].codec.as_str(), f[1].bitrate), ("", "", 0));
+        assert_eq!(f[2].bitrate, 0);
+        assert_eq!(f[3].bitrate, 96);
+        assert!(parse_favorites("").is_empty());
     }
 }

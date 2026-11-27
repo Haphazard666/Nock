@@ -608,6 +608,7 @@ mod tests {
             ("update", sys::WM_UPDATE),
             ("mic", sys::WM_MIC),
             ("frame", app::WM_FRAME),
+            ("tuner", crate::tuner::WM_TUNER),
         ];
         for (i, (na, a)) in all.iter().enumerate() {
             for (nb, b) in &all[i + 1..] {
