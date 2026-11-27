@@ -1,4 +1,6 @@
-# Nock Radio: spec v1.1
+# Nock Radio: spec v1.2
+
+Changed in v1.2 (after T2): favorites keep the HLS flag, first-open time loosened to 4 s with an instant loading state, country search hint, single-mirror risk noted.
 
 Changed in v1.1 (after T1): title via MediaPlaybackItem, 10 s connect timeout, Buffering is not an error, HLS flag, criteria 6 and 7 reworded, clippy lint fix allowed.
 
@@ -28,6 +30,8 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
   - On play, call `/json/url/<stationuuid>` once (their click-count etiquette)
 - Send a `User-Agent: Nock/<version>` header.
 - Play `url_resolved`, not `url`.
+- Search by country takes a two-letter code. The search box hint says so (for example "Name, genre, or country code like DE").
+- Known risk: Radio Browser currently lists one mirror (de1). If it is down, every fetch fails and the tab shows "Station list unavailable, try again later". Accepted for v1.
 - Default country: the Windows user region (for example `GetUserGeoID` / `GetUserDefaultGeoName`), falling back to no filter.
 
 ### How to fetch
@@ -50,7 +54,7 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 
 ## Storage
 
-- `%APPDATA%\Nock\stations.txt`, one favorite per line: `name|url_resolved|uuid|countrycode|codec|bitrate`. Same style as `apps.txt`. Tolerate bad lines.
+- `%APPDATA%\Nock\stations.txt`, one favorite per line: `name|url_resolved|uuid|countrycode|codec|bitrate|hls`. The 7th field `hls` (0/1) is optional on load, so 6-field lines still load as hls=0. Same style as `apps.txt`. Tolerate bad lines.
 - `config.ini`: `radio=1` (tab shown, default) / `0` (tab hidden), with a comment line like the other keys.
 
 ## Code layout
@@ -61,7 +65,7 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 
 ## Acceptance criteria v1
 
-1. The Radio tab shows a Top list for the user's country within about 3 s of first opening it.
+1. Opening the Radio tab shows a loading state at once, and the Top list for the user's country within about 4 s on the first open of a session, about 2 s after that.
 2. A search for `jazz` (tag) and for `BBC` (name) returns results.
 3. Clicking a station plays audio within about 5 s for a typical MP3 or AAC stream. Stop silences it right away.
 4. A dead stream shows an error line and does not freeze or crash Nock.
