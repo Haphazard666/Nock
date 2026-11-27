@@ -1,4 +1,6 @@
-# Nock Radio: spec v1.4
+# Nock Radio: spec v1.5
+
+Changed in v1.5 (after T4): criterion 12 split into a local network drop (event driven, "No network") and a station drop (Buffering timer); a silent station with no event is a known v1 gap.
 
 Changed in v1.4 (during T4): criterion 12 counts from when the audio stops, live streams show no duration in the Media card.
 
@@ -82,6 +84,5 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 9. `cargo build --release`, `cargo test`, `cargo clippy` pass. The preview test renders the Radio tab. (`cargo clippy` fails on upstream main at `src/games.rs:554`, `6.28` as approx_constant. The Engineer may fix that one line with `std::f32::consts::TAU` or similar, in its own commit.)
 10. `radio=0` hides the tab.
 11. A station that never answers shows "Station not responding" within about 10 s.
-12. A stream that drops after playing shows "Connection lost" within about 15 s after the audio stops (stations send up to about a minute of buffered audio, which keeps playing after a drop; that is fine), or at once if the server hangs up.
-14. Nock's Media card shows no duration or progress for a live radio stream (no huge number such as 256204778:4...). Treat a duration over 24 h, or no duration, as live.
+12. **Network drop.** (a) When Windows reports the PC has lost its network while radio plays, the strip shows "No network" (amber, with a shape) within about 5 s of that report. The player is kept alive. When the network returns and audio resumes on its own, the strip goes back to "Playing". If audio has not resumed 15 s after the network returns, show "Connection lost". Use a Windows network-change event (reuse one Nock already listens to if there is one), never polling. (b) **Station drop.** A stream that enters Buffering after it opened shows "Connection lost" 15 s later, or at once if the server hangs up (T4 proved this with a local relay). (c) Known v1 gap: a station that goes silent with the network fine and the player still reporting Playing is not detected.
 13. Pressing Stop never freezes the panel (no visible hitch).
