@@ -9,6 +9,8 @@
 //!
 //! Playback (`Player`) uses WinRT `MediaPlayer`. Its event handlers run on WinRT worker
 //! threads and only post `WM_TUNER_PLAY`; every state change happens on the UI thread.
+//! While a player exists it also listens to `NetworkInformation.NetworkStatusChanged`
+//! (posts `WM_TUNER_NET`), so a lost network shows at once. The listener goes with the player.
 //!
 //! Security: search text is user input. It is URL-encoded here, and only the encoded form
 //! (letters, digits and `-_.~%`) ever reaches the script. Server names and station uuids
@@ -22,6 +24,9 @@ use crate::store::Favorite;
 pub const WM_TUNER: u32 = 0x8000 + 13; // WM_APP + 13: a directory fetch finished (WPARAM = its id)
 /// WM_APP + 14: a player event (WPARAM = player generation, LPARAM = `encode_event`).
 pub const WM_TUNER_PLAY: u32 = 0x8000 + 14;
+/// WM_APP + 15: Windows reported a network change while a player exists
+/// (WPARAM = player generation, LPARAM = 1 when the PC has internet, 0 when it has none).
+pub const WM_TUNER_NET: u32 = 0x8000 + 15;
 
 const SERVER_LIST: &str = "https://all.api.radio-browser.info/json/servers";
 /// How many mirrors one fetch tries before giving up.
@@ -515,6 +520,22 @@ pub fn decode_event(lp: isize) -> Option<PlayEv> {
 pub struct Player {
     mp: windows::Media::Playback::MediaPlayer,
     pub gen: usize,
+    /// the `NetworkStatusChanged` registration, removed when the player goes
+    net: Option<i64>,
+}
+
+/// Whether Windows says the PC can reach the internet now: an internet connection profile
+/// with internet (or captive-portal, "constrained") access. No profile, none or local
+/// access only counts as no network. Reads Windows' own state; no network traffic.
+pub fn net_up() -> bool {
+    use windows::Networking::Connectivity::NetworkInformation;
+    let level = NetworkInformation::GetInternetConnectionProfile().and_then(|p| p.GetNetworkConnectivityLevel());
+    level_up(level.ok().map(|l| l.0))
+}
+
+/// `NetworkConnectivityLevel`: 0 none, 1 local access, 2 constrained internet, 3 internet.
+fn level_up(level: Option<i32>) -> bool {
+    matches!(level, Some(2) | Some(3))
 }
 
 impl Player {
@@ -572,12 +593,43 @@ impl Player {
         mp.SetSource(&item)?;
         mp.Play()?;
         trace(&format!("player {gen} play {}", st.name));
-        Ok(Player { mp, gen })
+        // Network changes while this player lives: the handler runs on a WinRT worker thread,
+        // reads Windows' connectivity level and only posts a message. No polling.
+        let net = {
+            use windows::Networking::Connectivity::{NetworkInformation, NetworkStatusChangedEventHandler};
+            NetworkInformation::NetworkStatusChanged(&NetworkStatusChangedEventHandler::new(move |_| {
+                unsafe {
+                    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+                    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+                    let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_TUNER_NET, WPARAM(gen), LPARAM(net_up() as isize));
+                }
+                Ok(())
+            }))
+            .ok()
+        };
+        Ok(Player { mp, gen, net })
     }
 
     /// Play again after a pause from the Windows media flyout or Nock's Media card.
     pub fn resume(&self) {
         let _ = self.mp.Play();
+    }
+
+    /// The player's own state now (one property read).
+    pub fn state(&self) -> PlayState {
+        use windows::Media::Playback::MediaPlaybackState;
+        match self.mp.PlaybackSession().and_then(|s| s.PlaybackState()) {
+            Ok(MediaPlaybackState::Opening) => PlayState::Opening,
+            Ok(MediaPlaybackState::Buffering) => PlayState::Buffering,
+            Ok(MediaPlaybackState::Playing) => PlayState::Playing,
+            Ok(MediaPlaybackState::Paused) => PlayState::Paused,
+            _ => PlayState::Other,
+        }
+    }
+
+    /// Playback position in 100 ns ticks (one property read); 0 if unknown.
+    pub fn position(&self) -> i64 {
+        self.mp.PlaybackSession().and_then(|s| s.Position()).map(|t| t.Duration).unwrap_or(0)
     }
 }
 
@@ -587,6 +639,9 @@ impl Drop for Player {
     /// as soon as the player is closed and released.
     fn drop(&mut self) {
         let t = std::time::Instant::now();
+        if let Some(tok) = self.net.take() {
+            let _ = windows::Networking::Connectivity::NetworkInformation::RemoveNetworkStatusChanged(tok);
+        }
         let _ = self.mp.SetIsMuted(true);
         let _ = self.mp.Pause();
         let gen = self.gen;
@@ -782,6 +837,16 @@ mod tests {
     }
 
     #[test]
+    fn only_internet_access_counts_as_network() {
+        // NetworkConnectivityLevel: 0 none, 1 local only, 2 constrained, 3 internet
+        assert!(!level_up(None)); // no internet connection profile at all
+        assert!(!level_up(Some(0)));
+        assert!(!level_up(Some(1)));
+        assert!(level_up(Some(2)));
+        assert!(level_up(Some(3)));
+    }
+
+    #[test]
     fn unsafe_pieces_are_refused() {
         assert!(search_script("/json/x?name='; calc", &[]).is_none());
         assert!(click_script("abc'; calc", &[]).is_none());
@@ -837,6 +902,7 @@ mod tests {
     fn message_number() {
         assert_eq!(WM_TUNER, 0x8000 + 13);
         assert_eq!(WM_TUNER_PLAY, 0x8000 + 14);
+        assert_eq!(WM_TUNER_NET, 0x8000 + 15);
     }
 
     #[test]

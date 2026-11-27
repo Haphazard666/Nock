@@ -608,14 +608,17 @@ fn page_media(a: &App, ca: f32, hits: &mut Vec<Hit>) {
         pos
     };
     let bar = Rect::new(tx, 104.0, EXP_W - tx - 28.0, 18.0);
-    slider(a, bar, frac, Act::Seek, a.accent, ca, hits, dur > 0.0 && m.can_seek);
-    g.text(
-        &fmt_time(shown),
-        Rect::new(tx, 122.0, 70.0, 16.0),
-        &f.tiny,
-        T3.fade(ca),
-        Align::Left,
-    );
+    // a live source (internet radio, duration none or over a day): no bar, no times
+    if loading.is_some() || !m.is_live() {
+        slider(a, bar, frac, Act::Seek, a.accent, ca, hits, dur > 0.0 && m.can_seek);
+        g.text(
+            &fmt_time(shown),
+            Rect::new(tx, 122.0, 70.0, 16.0),
+            &f.tiny,
+            T3.fade(ca),
+            Align::Left,
+        );
+    }
     if dur > 0.0 {
         g.text(
             &fmt_time(dur),
@@ -1131,6 +1134,13 @@ fn warn_glyph(g: &Gfx, cx: f32, cy: f32, s: f32, col: Color, ca: f32) {
     g.fill_circle(cx, cy + s * 0.31, (s * 0.07).max(0.8), BLACK.fade(ca));
 }
 
+/// An amber ring with a slash through it (no network). Not the warning triangle, so it
+/// reads as "waiting for the network", not as a failed station.
+fn no_net_glyph(g: &Gfx, cx: f32, cy: f32, col: Color, ca: f32) {
+    g.stroke_rrect(Rect::new(cx - 5.0, cy - 5.0, 10.0, 10.0), 5.0, col.fade(ca), 1.5);
+    g.line((cx - 3.4, cy + 3.4), (cx + 3.4, cy - 3.4), 1.5, col.fade(ca));
+}
+
 /// Three level bars (playing).
 fn live_glyph(g: &Gfx, x: f32, cy: f32, col: Color, ca: f32) {
     for (i, h) in [6.0f32, 10.0, 7.5].iter().enumerate() {
@@ -1196,6 +1206,10 @@ fn page_radio(a: &App, ca: f32, hits: &mut Vec<Hit>) {
                 }
             }
             g.text(&t, line, &f.tiny, T2.fade(ca), Align::Left);
+        }
+        RStatus::NoNetwork => {
+            no_net_glyph(g, tx + 5.5, gy, C_WARN, ca);
+            g.text("No network", line, &f.tiny, C_WARN.fade(ca), Align::Left);
         }
         RStatus::Connecting | RStatus::Buffering => {
             wait_glyph(g, tx, gy, T2, ca);

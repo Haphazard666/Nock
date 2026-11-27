@@ -332,6 +332,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         m if m == sys::WM_APPLIST => a.on_app_list(),
         m if m == crate::tuner::WM_TUNER => a.on_tuner(wp.0),
         m if m == crate::tuner::WM_TUNER_PLAY => a.on_tuner_play(wp.0, lp.0),
+        m if m == crate::tuner::WM_TUNER_NET => a.on_tuner_net(wp.0, lp.0 != 0),
         m if m == sys::WM_UPDATE => on_update(hwnd, wp.0),
         m if m == sys::WM_MIC => a.update_call(),
         m if m == sys::WM_BRIGHT => a.on_brightness(wp.0 != 0, lp.0 as u32),
@@ -612,6 +613,7 @@ mod tests {
             ("frame", app::WM_FRAME),
             ("tuner", crate::tuner::WM_TUNER),
             ("tuner player", crate::tuner::WM_TUNER_PLAY),
+            ("tuner network", crate::tuner::WM_TUNER_NET),
         ];
         for (i, (na, a)) in all.iter().enumerate() {
             for (nb, b) in &all[i + 1..] {

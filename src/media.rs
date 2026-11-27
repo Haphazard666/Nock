@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 /// Posted to the UI window whenever `MediaState` changed.
 pub const WM_MEDIA: u32 = 0x8000 + 1; // WM_APP + 1
 
+/// Longer than this (24 h, in 100 ns ticks) counts as a live source with no real end.
+const LIVE_TICKS: i64 = 24 * 3600 * 10_000_000;
+
 #[derive(Default, Clone)]
 pub struct MediaState {
     pub has_session: bool,
@@ -42,9 +45,17 @@ impl MediaState {
         self.has_session && !(self.title.is_empty() && self.artist.is_empty())
     }
 
+    /// A live source (internet radio): no duration, or one longer than a day. WinRT
+    /// reports about 256 million hours for a live stream. The Media card then shows no
+    /// times and no progress bar.
+    pub fn is_live(&self) -> bool {
+        self.dur_ticks <= 0 || self.dur_ticks > LIVE_TICKS
+    }
+
     /// (position, duration) in seconds, extrapolated to `now_ft` while playing.
+    /// A live source has duration 0.
     pub fn progress(&self, now_ft: i64) -> (f64, f64) {
-        let dur = self.dur_ticks as f64 / 1e7;
+        let dur = if self.is_live() { 0.0 } else { self.dur_ticks as f64 / 1e7 };
         let mut pos = self.pos_ticks as f64 / 1e7;
         if self.playing && self.pos_stamp > 0 && now_ft > self.pos_stamp {
             let rate = if self.rate > 0.0 { self.rate } else { 1.0 };
@@ -538,6 +549,25 @@ mod tests {
         s.rate = 2.0;
         let (pos, _) = s.progress(1_000_000_000 + 5 * 10_000_000);
         assert!((pos - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_live_stream_has_no_duration() {
+        // what the radio's WinRT player reports: about 256 million hours
+        let mut s = st(true);
+        s.dur_ticks = 256_204_778 * 3600 * 10_000_000;
+        assert!(s.is_live());
+        assert_eq!(s.progress(1_000_000_000 + 5 * 10_000_000).1, 0.0);
+        s.dur_ticks = 0;
+        assert!(s.is_live());
+        // just over a day is live, a day or a normal song is not
+        s.dur_ticks = LIVE_TICKS + 1;
+        assert!(s.is_live());
+        s.dur_ticks = LIVE_TICKS;
+        assert!(!s.is_live());
+        assert!(!st(true).is_live());
+        let (_, dur) = st(true).progress(1_000_000_000);
+        assert!((dur - 200.0).abs() < 1e-6);
     }
 
     #[test]

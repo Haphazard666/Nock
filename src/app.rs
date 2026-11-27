@@ -128,6 +128,13 @@ const T_RSTALL: usize = 25;
 const RADIO_STALL_MS: u32 = 15_000;
 /// What the strip says when an opened stream dropped (stall timeout, ended, failed).
 const RADIO_LOST: &str = "Connection lost";
+/// One-shot, 15 s after Windows reports the network is back: if the audio has not moved
+/// on by then, the connection is lost. Killed when it plays again, pauses, fails or stops.
+const T_RNET: usize = 26;
+/// How long after the network returns the audio may take to resume.
+const RADIO_RESUME_MS: u32 = 15_000;
+/// The position must move at least this much (1 s, in 100 ns ticks) in those 15 s.
+const RADIO_RESUME_TICKS: i64 = 10_000_000;
 /// Station rows the Radio tab shows at once.
 pub const RADIO_ROWS: usize = 4;
 /// How long a peek lasts, seconds.
@@ -250,6 +257,8 @@ pub enum RStatus {
     Playing,
     /// paused from the Windows media flyout or Nock's Media card
     Paused,
+    /// Windows reports no network; the player is kept and waits for it to come back
+    NoNetwork,
     Error(String),
 }
 
@@ -280,6 +289,10 @@ pub struct RadioUi {
     pub opened: bool,
     /// counts players, so events from an old one are ignored
     pub gen: usize,
+    /// Windows reported the network gone while this player lived (and not back yet)
+    pub net_down: bool,
+    /// player position when the network came back (for the 15 s resume check)
+    pub resume_from: i64,
     /// the country the Top list is for (the Windows region), if any
     pub country: Option<String>,
 }
@@ -318,7 +331,7 @@ impl RadioUi {
 
     /// A station is playing, connecting, buffering or paused (a player exists for it).
     pub fn active(&self) -> bool {
-        matches!(self.status, RStatus::Connecting | RStatus::Buffering | RStatus::Playing | RStatus::Paused)
+        matches!(self.status, RStatus::Connecting | RStatus::Buffering | RStatus::Playing | RStatus::Paused | RStatus::NoNetwork)
     }
 
     /// The station in the list is the one playing (or connecting).
@@ -1213,6 +1226,7 @@ impl App {
             T_BPEEK => self.on_peek_timer(),
             T_RADIO => self.on_radio_timeout(),
             T_RSTALL => self.on_radio_stall(),
+            T_RNET => self.on_radio_resume_check(),
             T_DOTS => {
                 self.kill_timer(T_DOTS);
                 self.cycle_until = None;
@@ -2269,7 +2283,9 @@ impl App {
     fn radio_drop_player(&mut self) {
         self.kill_timer(T_RADIO);
         self.kill_timer(T_RSTALL);
+        self.kill_timer(T_RNET);
         self.rad.player = None;
+        self.rad.net_down = false;
     }
 
     /// Stop: the player is dropped, so nothing of it is left running.
@@ -2309,9 +2325,46 @@ impl App {
         }
         let Some(ev) = crate::tuner::decode_event(lp) else { return };
         crate::tuner::trace(&format!("player {gen} {ev:?}"));
-        let step = radio_step(&self.rad.status, self.rad.opened, ev);
+        let step = radio_step(&self.rad.status, self.rad.opened, self.rad.net_down, ev);
+        self.radio_apply(step);
+    }
+
+    /// Windows reported a network change (`WM_TUNER_NET`, only while a player exists).
+    /// Gone: "No network", the player is kept. Back: the strip shows what the player is
+    /// really doing, and a 15 s check starts that the audio moves on.
+    pub fn on_tuner_net(&mut self, gen: usize, up: bool) {
+        let Some(p) = self.rad.player.as_ref().filter(|p| p.gen == gen) else { return };
+        let (real, pos) = (p.state(), p.position());
+        crate::tuner::trace(&format!("player {gen} network {} (player {real:?}, position {pos})", if up { "up" } else { "down" }));
+        let (step, down) = radio_net(&self.rad.status, self.rad.opened, self.rad.net_down, up, real);
+        if step.resume == Tm::Start {
+            self.rad.resume_from = pos;
+        }
+        self.rad.net_down = down;
+        self.radio_apply(step);
+    }
+
+    /// 15 s after the network came back: if the audio has not moved on, it is lost.
+    fn on_radio_resume_check(&mut self) {
+        self.kill_timer(T_RNET);
+        let Some(p) = self.rad.player.as_ref() else { return };
+        let pos = p.position();
+        crate::tuner::trace(&format!("resume check: position {} -> {pos}", self.rad.resume_from));
+        if matches!(self.rad.status, RStatus::Paused | RStatus::NoNetwork | RStatus::Error(_)) {
+            return;
+        }
+        if !resumed(self.rad.resume_from, pos) {
+            crate::tuner::trace("resume timeout");
+            self.radio_drop_player();
+            self.rad.status = RStatus::Error(RADIO_LOST.into());
+            self.render_radio();
+        }
+    }
+
+    /// Carry out one step of the radio's rules: timers, dropping the player, the strip.
+    fn radio_apply(&mut self, step: RStep) {
         self.rad.opened = step.opened;
-        for (id, ms, tm) in [(T_RADIO, RADIO_CONNECT_MS, step.connect), (T_RSTALL, RADIO_STALL_MS, step.stall)] {
+        for (id, ms, tm) in [(T_RADIO, RADIO_CONNECT_MS, step.connect), (T_RSTALL, RADIO_STALL_MS, step.stall), (T_RNET, RADIO_RESUME_MS, step.resume)] {
             match tm {
                 Tm::Start => self.set_timer(id, ms),
                 Tm::Kill => self.kill_timer(id),
@@ -3274,9 +3327,11 @@ struct RStep {
     /// the strip's new status (None: unchanged)
     status: Option<RStatus>,
     opened: bool,
-    /// the 10 s connect timer (`T_RADIO`) and the 15 s stall timer (`T_RSTALL`)
+    /// the 10 s connect timer (`T_RADIO`), the 15 s stall timer (`T_RSTALL`) and the
+    /// 15 s check after the network came back (`T_RNET`)
     connect: Tm,
     stall: Tm,
+    resume: Tm,
     /// drop the player
     drop: bool,
 }
@@ -3288,9 +3343,12 @@ struct RStep {
 /// - Paused and Playing come from Nock or from outside (the Windows media flyout, the
 ///   Media card): the strip shows whichever is true.
 /// - A live stream that ends or fails after it opened lost its connection.
-fn radio_step(status: &RStatus, opened: bool, ev: crate::tuner::PlayEv) -> RStep {
+/// - While Windows reports no network (`net_down`), the strip keeps saying "No network"
+///   whatever the player claims (it can claim Playing while silent), and no stall timer
+///   starts. A pause still shows, and a failure still drops the player.
+fn radio_step(status: &RStatus, opened: bool, net_down: bool, ev: crate::tuner::PlayEv) -> RStep {
     use crate::tuner::{Fail, PlayEv, PlayState};
-    let mut r = RStep { status: None, opened, connect: Tm::Keep, stall: Tm::Keep, drop: false };
+    let mut r = RStep { status: None, opened, connect: Tm::Keep, stall: Tm::Keep, resume: Tm::Keep, drop: false };
     match ev {
         PlayEv::Opened => {
             r.connect = Tm::Kill;
@@ -3301,24 +3359,25 @@ fn radio_step(status: &RStatus, opened: bool, ev: crate::tuner::PlayEv) -> RStep
         }
         PlayEv::Failed(f) => {
             r.drop = true;
-            r.connect = Tm::Kill;
-            r.stall = Tm::Kill;
+            (r.connect, r.stall, r.resume) = (Tm::Kill, Tm::Kill, Tm::Kill);
             let text = if opened && f != Fail::Format { RADIO_LOST } else { f.text() };
             r.status = Some(RStatus::Error(text.into()));
         }
         PlayEv::Ended => {
             r.drop = true;
-            r.connect = Tm::Kill;
-            r.stall = Tm::Kill;
+            (r.connect, r.stall, r.resume) = (Tm::Kill, Tm::Kill, Tm::Kill);
             r.status = Some(RStatus::Error(if opened { RADIO_LOST } else { Fail::Offline.text() }.into()));
         }
         PlayEv::State(PlayState::Playing) => {
             r.connect = Tm::Kill;
             r.stall = Tm::Kill;
             r.opened = true;
-            r.status = Some(RStatus::Playing);
+            if !net_down {
+                r.resume = Tm::Kill;
+                r.status = Some(RStatus::Playing);
+            }
         }
-        PlayEv::State(PlayState::Buffering) if opened => {
+        PlayEv::State(PlayState::Buffering) if opened && !net_down => {
             if *status != RStatus::Buffering {
                 r.stall = Tm::Start;
             }
@@ -3326,11 +3385,61 @@ fn radio_step(status: &RStatus, opened: bool, ev: crate::tuner::PlayEv) -> RStep
         }
         PlayEv::State(PlayState::Paused) if opened => {
             r.stall = Tm::Kill;
+            r.resume = Tm::Kill;
             r.status = Some(RStatus::Paused);
         }
         PlayEv::State(_) => {}
     }
+    // "No network" stays until Windows reports the network back
+    if net_down && *status == RStatus::NoNetwork && matches!(r.status, Some(RStatus::Playing | RStatus::Buffering)) {
+        r.status = None;
+    }
     r
+}
+
+/// The rules for a network change Windows reported while a player exists. Returns the
+/// step and whether the network now counts as down.
+/// - Gone while connecting, playing or buffering: "No network". The player is kept, and
+///   its timers stop (a stall is expected now, it is not the station's fault).
+/// - Back after "No network": the strip shows what the player really does (`real`). An
+///   opened stream gets the 15 s resume check; one that never opened gets its 10 s
+///   connect timeout again.
+/// - Repeats (Windows sends several events per change) change nothing.
+fn radio_net(status: &RStatus, opened: bool, net_down: bool, up: bool, real: crate::tuner::PlayState) -> (RStep, bool) {
+    use crate::tuner::PlayState;
+    let mut r = RStep { status: None, opened, connect: Tm::Keep, stall: Tm::Keep, resume: Tm::Keep, drop: false };
+    if !up {
+        match status {
+            RStatus::Connecting | RStatus::Playing | RStatus::Buffering => {
+                (r.connect, r.stall, r.resume) = (Tm::Kill, Tm::Kill, Tm::Kill);
+                r.status = Some(RStatus::NoNetwork);
+            }
+            RStatus::Paused => r.resume = Tm::Kill,
+            _ => {}
+        }
+        return (r, true);
+    }
+    if net_down && *status == RStatus::NoNetwork {
+        if !opened {
+            r.connect = Tm::Start;
+            r.status = Some(RStatus::Connecting);
+        } else {
+            r.status = Some(match real {
+                PlayState::Playing => RStatus::Playing,
+                PlayState::Paused => RStatus::Paused,
+                _ => RStatus::Buffering,
+            });
+            if real != PlayState::Paused {
+                r.resume = Tm::Start;
+            }
+        }
+    }
+    (r, false)
+}
+
+/// The resume check: the position moved on at least 1 s since the network came back.
+fn resumed(from: i64, now: i64) -> bool {
+    now - from >= RADIO_RESUME_TICKS
 }
 
 #[cfg(test)]
@@ -3347,7 +3456,7 @@ mod radio_tests {
         let (mut st, mut opened) = (RStatus::Connecting, false);
         let mut last = None;
         for e in evs {
-            let r = radio_step(&st, opened, *e);
+            let r = radio_step(&st, opened, false, *e);
             opened = r.opened;
             if let Some(s) = r.status.clone() {
                 st = s;
@@ -3419,6 +3528,118 @@ mod radio_tests {
         assert_eq!(st, RStatus::Error("Format not supported".into()));
     }
 
+    /// Feed network changes and player events, from a stream that opened and plays.
+    /// `Err(up)` is a network change, `Ok(ev)` a player event; `real` is what the player
+    /// reports when the network comes back.
+    fn run_net(steps: &[std::result::Result<PlayEv, bool>], real: PlayState) -> (RStep, RStatus, bool) {
+        let (mut st, mut opened, mut down) = (RStatus::Playing, true, false);
+        let mut last = None;
+        for s in steps {
+            let r = match s {
+                Ok(e) => radio_step(&st, opened, down, *e),
+                Err(up) => {
+                    let (r, d) = radio_net(&st, opened, down, *up, real);
+                    down = d;
+                    r
+                }
+            };
+            opened = r.opened;
+            if let Some(s) = r.status.clone() {
+                st = s;
+            }
+            last = Some(r);
+        }
+        (last.expect("steps"), st, down)
+    }
+
+    #[test]
+    fn network_gone_shows_no_network_and_keeps_the_player() {
+        for from in [PLAY, BUF] {
+            let (r, st, down) = run_net(&[Ok(from), Err(false)], PlayState::Playing);
+            assert_eq!(st, RStatus::NoNetwork);
+            assert!(down && !r.drop);
+            assert_eq!((r.connect, r.stall, r.resume), (Tm::Kill, Tm::Kill, Tm::Kill));
+        }
+        // the player may keep claiming Playing, or start buffering: still "No network",
+        // and no stall timer (that would drop the player)
+        let (r, st, _) = run_net(&[Err(false), Ok(PLAY), Ok(BUF), Ok(PLAY), Err(false)], PlayState::Playing);
+        assert_eq!((st, r.drop), (RStatus::NoNetwork, false));
+        let (r, _, _) = run_net(&[Err(false), Ok(BUF)], PlayState::Playing);
+        assert_eq!(r.stall, Tm::Keep);
+    }
+
+    #[test]
+    fn network_back_shows_the_real_state_and_starts_the_resume_check() {
+        let (r, st, down) = run_net(&[Err(false), Err(true)], PlayState::Playing);
+        assert_eq!((st, down, r.resume), (RStatus::Playing, false, Tm::Start));
+        let (r, st, _) = run_net(&[Err(false), Err(true)], PlayState::Buffering);
+        assert_eq!((st, r.resume), (RStatus::Buffering, Tm::Start));
+        let (r, st, _) = run_net(&[Err(false), Err(true)], PlayState::Paused);
+        assert_eq!((st, r.resume), (RStatus::Paused, Tm::Keep));
+        // audio comes back (Buffering then Playing): the check is called off
+        let (r, st, _) = run_net(&[Err(false), Err(true), Ok(BUF), Ok(PLAY)], PlayState::Buffering);
+        assert_eq!((st, r.resume, r.drop), (RStatus::Playing, Tm::Kill, false));
+        // the 15 s check itself: the position has to move on at least a second
+        assert!(!resumed(50 * 10_000_000, 50 * 10_000_000));
+        assert!(!resumed(50 * 10_000_000, 50 * 10_000_000 + 9_999_999));
+        assert!(resumed(50 * 10_000_000, 51 * 10_000_000));
+    }
+
+    #[test]
+    fn repeated_network_events_change_nothing() {
+        // Windows sends several events per change
+        let (r, st, down) = run_net(&[Err(false), Err(false)], PlayState::Playing);
+        assert_eq!((st, down, r.status, r.resume), (RStatus::NoNetwork, true, None, Tm::Keep));
+        let (r, st, _) = run_net(&[Err(false), Err(true), Err(true)], PlayState::Playing);
+        assert_eq!((st, r.resume, r.status), (RStatus::Playing, Tm::Keep, None));
+        // network up while it never went down: nothing
+        let (r, st, _) = run_net(&[Err(true)], PlayState::Playing);
+        assert_eq!((st, r.status, r.resume), (RStatus::Playing, None, Tm::Keep));
+    }
+
+    #[test]
+    fn network_and_pause_and_failure() {
+        // paused from outside while there is no network: the pause shows
+        let (r, st, _) = run_net(&[Err(false), Ok(PAUSE)], PlayState::Paused);
+        assert_eq!((st, r.resume), (RStatus::Paused, Tm::Kill));
+        // network gone while paused: stays Paused, and back again: still Paused
+        let (_, st, down) = run_net(&[Ok(PAUSE), Err(false)], PlayState::Paused);
+        assert_eq!((st, down), (RStatus::Paused, true));
+        let (r, st, _) = run_net(&[Ok(PAUSE), Err(false), Err(true)], PlayState::Paused);
+        assert_eq!((st, r.resume), (RStatus::Paused, Tm::Keep));
+        // the player gives up on its own while there is no network: connection lost
+        let (r, st, _) = run_net(&[Err(false), Ok(PlayEv::Ended)], PlayState::Playing);
+        assert!(r.drop);
+        assert_eq!((st, r.resume), (RStatus::Error(RADIO_LOST.into()), Tm::Kill));
+        // after the network is back, a pause calls off the resume check
+        let (r, _, _) = run_net(&[Err(false), Err(true), Ok(PAUSE)], PlayState::Playing);
+        assert_eq!(r.resume, Tm::Kill);
+    }
+
+    #[test]
+    fn network_gone_while_connecting() {
+        let (st0, opened) = (RStatus::Connecting, false);
+        let (r, down) = radio_net(&st0, opened, false, false, PlayState::Opening);
+        assert_eq!((r.status.clone(), down, r.connect), (Some(RStatus::NoNetwork), true, Tm::Kill));
+        // back: connecting again, with its 10 s timeout
+        let (r, down) = radio_net(&RStatus::NoNetwork, opened, true, true, PlayState::Opening);
+        assert_eq!((r.status, down, r.connect, r.resume), (Some(RStatus::Connecting), false, Tm::Start, Tm::Keep));
+        // opening while there is no network keeps "No network"
+        let r = radio_step(&RStatus::NoNetwork, false, true, PlayEv::Opened);
+        assert_eq!((r.status, r.opened), (None, true));
+    }
+
+    #[test]
+    fn network_events_leave_idle_and_errors_alone() {
+        for st in [RStatus::Idle, RStatus::Error(RADIO_LOST.into())] {
+            for up in [false, true] {
+                let (r, _) = radio_net(&st, true, !up, up, PlayState::Playing);
+                assert_eq!(r.status, None);
+                assert_eq!((r.connect, r.stall, r.resume, r.drop), (Tm::Keep, Tm::Keep, Tm::Keep, false));
+            }
+        }
+    }
+
     #[test]
     fn timer_ids_are_all_different() {
         let all = [
@@ -3447,6 +3668,7 @@ mod radio_tests {
             ("buddy peek", T_BPEEK),
             ("radio connect", T_RADIO),
             ("radio stall", T_RSTALL),
+            ("radio resume", T_RNET),
         ];
         for (i, (na, a)) in all.iter().enumerate() {
             for (nb, b) in &all[i + 1..] {
@@ -3546,6 +3768,15 @@ mod preview {
             (a.stat_cpu, a.stat_mem, a.bar_cpu, a.bar_mem) = (23, 61, 0.23, 0.61);
             render(&a, &name);
         }
+        // the Media card for a live stream (internet radio): no times, no progress bar
+        {
+            let dur = a.mstate.dur_ticks;
+            a.page = Page::Media;
+            a.snap_tab();
+            a.mstate.dur_ticks = 256_204_778 * 3600 * 10_000_000;
+            render(&a, "media_live");
+            a.mstate.dur_ticks = dur;
+        }
         // the Radio tab: empty, loading, a list, playing, buffering, errors, search, favorites
         {
             use crate::tuner::Station;
@@ -3599,6 +3830,8 @@ mod preview {
             render(&a, "radio_buffering");
             a.rad.status = RStatus::Paused;
             render(&a, "radio_paused");
+            a.rad.status = RStatus::NoNetwork;
+            render(&a, "radio_no_network");
             a.rad.now = Some(list[2].clone());
             a.rad.status = RStatus::Error("Station not responding".into());
             render(&a, "radio_error");
