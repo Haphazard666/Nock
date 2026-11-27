@@ -1,4 +1,6 @@
-# Nock Radio: spec v1.2
+# Nock Radio: spec v1.3
+
+Changed in v1.3 (after T3): criterion 7 measures the radio's own cost, stall timeout after a stream drops, Stop must not block the UI, one search box for name and genre (as built).
 
 Changed in v1.2 (after T2): favorites keep the HLS flag, first-open time loosened to 4 s with an instant loading state, country search hint, single-mirror risk noted.
 
@@ -49,6 +51,8 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 - Event handlers run on worker threads. They only post a window message (new `WM_APP + n`) to the UI thread. No polling.
 - **Connect timeout:** `MediaFailed` doesn't fire for a host that silently drops the connection. On Play, start a one-shot 10 s window timer. Kill it on `MediaOpened`. If it fires, stop the player and show "Station not responding". This is a one-shot timer, not polling.
 - `MediaFailed` gives only a code. Nock writes its own short error text ("Station offline", "Format not supported", "Network error").
+- **Stall timeout:** if the stream was playing and then sits in Buffering for 15 s, stop the player and show "Connection lost". One-shot timer started on entering Buffering after MediaOpened, killed on Playing.
+- Stop must not block the UI thread. Release the player off the UI thread (for example on a short-lived thread that exits when done). Audio must still go silent at once.
 - Buffering is not an error. Playback state flips between Buffering and Playing while audio keeps going. Show "Buffering..." in the strip, never an error.
 - Media session: T1 confirmed that the stream shows in Windows media sessions and in Nock's Media card with no AUMID setup.
 
@@ -71,8 +75,10 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 4. A dead stream shows an error line and does not freeze or crash Nock.
 5. Starring a station adds it to Favorites, and it is still there after restarting Nock.
 6. With radio stopped: Nock's CPU is 0%, no player object exists, and no thread created by Nock code is alive. Threads and memory that Media Foundation keeps after a first play are accepted (T1: about 26 threads).
-7. While playing, measured inside Nock: under 2% of one core, and under 20 MB extra **private bytes** versus Nock before the first play.
+7. The radio's own cost while playing, measured inside Nock with `eq_animation=0`: under 2% of one core, and under 20 MB extra **private bytes** versus Nock before the first play. (Nock's existing equaliser animation runs for any media, Spotify included; its cost is not the radio's.)
 8. Hostile search input (`'; Remove-Item x; '`, `$(calc)`) runs nothing.
 9. `cargo build --release`, `cargo test`, `cargo clippy` pass. The preview test renders the Radio tab. (`cargo clippy` fails on upstream main at `src/games.rs:554`, `6.28` as approx_constant. The Engineer may fix that one line with `std::f32::consts::TAU` or similar, in its own commit.)
-11. A station that never answers shows "Station not responding" within about 10 s.
 10. `radio=0` hides the tab.
+11. A station that never answers shows "Station not responding" within about 10 s.
+12. A stream that drops after playing shows "Connection lost" within about 15 s.
+13. Pressing Stop never freezes the panel (no visible hitch).
