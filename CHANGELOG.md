@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New **Radio** tab, right after Media: internet radio stations from every country, from the free [Radio Browser](https://www.radio-browser.info/) directory. Three lists: *Top* (the most played stations in your Windows region), *Search* (one box for a name, a genre such as `jazz`, or a two-letter country code such as `DE`) and *Favorites* (star a station; saved in `stations.txt`). A strip at the top shows the station, Connecting / Playing / Buffering / Paused, and a short error line when a stream fails ("Station offline", "Format not supported", "Network error", "Station not responding" after 10 s, "Connection lost" when a playing stream drops for 15 s). Plays MP3, AAC and HLS through Windows' own media player, so the station shows in the Windows media flyout and on the Media tab, and pausing it there updates the strip.
+- The Radio tab only uses the network when you act: opening the tab (the Top list, once per run), a search, or pressing play. Nothing at start-up or in the background. No player and no extra thread is left once you press stop, and stopping does not freeze the panel.
+- New `config.ini` key `radio` (1 shows the tab, the default; 0 hides it).
+
 ## 0.13.0
 
 - Linux preview (X11 / XWayland): the pill, the nine tabs (Media through MPRIS, Controls, Today, Stats, Clipboard, Shelf, Apps, Games, Power) and the top bar with Wi-Fi, Bluetooth, sound, brightness, battery and calendar dropdowns. Packaged as a `.deb` and a user-level tarball; CI builds, tests and smoke-tests both. Not yet on Linux: game sounds, smart pill alerts, reminders, tray menu, buddy and scenes.

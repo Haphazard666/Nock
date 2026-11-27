@@ -115,6 +115,7 @@ The pill itself reacts: it squishes when you click it, does a quick squash-and-s
 ### Pages (tab row at the top)
 
 - **Media**: artwork, title, artist, source app, seekable progress bar, previous / play-pause / next. Reads Windows' own media session, so it works with Spotify, YouTube and other browser media, VLC, Apple Music and so on. While music plays, the collapsed pill shows the artwork, track and equaliser bars. Press previous or next and the old track stays up with a spinner and "Loading next track" until the player has the new one, instead of flashing "Nothing playing".
+- **Radio**: internet radio from every country. See [Radio](#radio).
 - **Controls**: shortcuts to **Screenshot** (Snipping Tool) and the Windows Settings pages people look for: **Display**, **Sound**, **Network**, **Power & battery** and **All settings**. (Wi-Fi, Bluetooth, volume and brightness are in the top bar.)
 - **Today**: three cards.
   - *Focus timer*: 5 / 15 / 25 / 50 minute presets, or the pencil to type any number of minutes. Hover a to-do and click its ▶ to start a session on that task (the timer shows the task's name). A line under the timer shows today's focus minutes and tasks done. With *Auto break after focus* on (tray), a 5 minute break follows each session, then focus again. When a timer finishes you get three beeps, confetti, and the pill pulses "Time's up" for 30 s (or until you click it); the Quidditch scene celebrates if scenes are on.
@@ -130,6 +131,18 @@ The pill itself reacts: it squishes when you click it, does a quick squash-and-s
   - *Slicer*: swipe the mouse fast through flying fruit, avoid the bombs.
   - *Viking Run*: click to jump, click again in the air to double jump, hold to jump higher.
 - **Power**: Lock, Sleep, Restart and Shut down. Restart and Shut down ask for a second click within a few seconds.
+
+## Radio
+
+The Radio tab plays internet radio stations from any country. The station list comes from [Radio Browser](https://www.radio-browser.info/), a free, community-run directory (no account, no key).
+
+- **Top**: the most played stations in your Windows region (Settings → Time & language → Language & region → Country or region).
+- **Search**: type a station name (`BBC`), a genre (`jazz`) or a two-letter country code (`DE`) and press Enter.
+- **Favorites**: click the star on any station. Favorites are kept in `stations.txt` and survive restarts.
+
+Click a station to play it, click it again (or the button in the strip at the top) to stop. The strip shows what is playing and whether it is connecting, buffering or paused, or a short reason when a stream fails. The station shows up in the Windows media flyout and on Nock's Media tab like any other player, and pausing it there pauses it here. Use the Windows volume to make it louder or quieter.
+
+**Network:** the Radio tab only goes online when you do something: opening the tab loads the Top list (once per run), a search asks the directory, and pressing play opens the stream (and tells the directory it was played, as Radio Browser asks). Nothing is fetched at start-up or in the background, and once you press stop no player is left running. `radio=0` in `config.ini` hides the tab altogether.
 
 ## Top bar
 
@@ -248,9 +261,10 @@ The exe carries its own icon and file details (`assets/notch.ico`, embedded by `
 
 Everything is in `%APPDATA%\Nock\` (tray → *Open settings folder*). Most settings are in the tray menu; `config.ini` holds them too:
 
-- `config.ini`: `hover_expand` (open on hover instead of click), `eq_animation` (animate the equaliser bars), `clock_24h`, `reserve_space` (keep a thin strip at the top so maximised windows sit below the notch), `top_bar`, `buddy`, `scenes`, `scene_min`, `stats` (CPU/RAM on the bar), `clock_style` (0 digital, 1 analog, 2 binary, 3 until Friday), `water_min` and `eye_min` (minutes between reminders, 0 = off), `auto_break`, `start_menu` (the Start menu shortcut), `fs_hide` (hide while a full-screen app or game is in front; also in the tray as *Hide in full-screen apps*), `auto_hide` (stay hidden until the pointer touches the top-centre edge; tray: *Auto-hide*), `smart_hide` (fade out while a window covers the notch; tray: *Fade out when a window covers it*), `smart` (the hints above), `calendar_url` (your calendar link, empty = off), and `auto_close` (close the open panel when the pointer leaves it or another window comes to the front; tray: *Close the panel when the pointer leaves*).
+- `config.ini`: `hover_expand` (open on hover instead of click), `eq_animation` (animate the equaliser bars), `clock_24h`, `reserve_space` (keep a thin strip at the top so maximised windows sit below the notch), `top_bar`, `buddy`, `scenes`, `scene_min`, `stats` (CPU/RAM on the bar), `clock_style` (0 digital, 1 analog, 2 binary, 3 until Friday), `water_min` and `eye_min` (minutes between reminders, 0 = off), `auto_break`, `start_menu` (the Start menu shortcut), `fs_hide` (hide while a full-screen app or game is in front; also in the tray as *Hide in full-screen apps*), `auto_hide` (stay hidden until the pointer touches the top-centre edge; tray: *Auto-hide*), `smart_hide` (fade out while a window covers the notch; tray: *Fade out when a window covers it*), `smart` (the hints above), `calendar_url` (your calendar link, empty = off), `auto_close` (close the open panel when the pointer leaves it or another window comes to the front; tray: *Close the panel when the pointer leaves*), and `radio` (1 shows the [Radio](#radio) tab, the default; 0 hides it).
 - Idle notch keys in `config.ini`: `idle_glance` (0 off, 1 tasks left, 2 focus today, 3 CPU and RAM, 4 next meeting), `idle_focus_bar`, `idle_meeting_hours`, `day_line`, `day_start`, `day_end` and `idle_cycle`, `state_dot` and `peek` (see [Idle notch](#idle-notch)).
 - `apps.txt`: pinned launcher entries, one per line: `Name|target|optional arguments`. The Apps tab edits it for you (+ and ×), but you can edit it by hand too: the target can be an exe, folder, URL or `ms-settings:` link. After editing, use tray → *Reload pinned apps*.
+- `stations.txt`: your favorite radio stations, one per line: `name|stream url|station id|country|codec|bitrate|hls`. The Radio tab's star edits it.
 - `todos.txt`: the to-do list.
 - `pinned_clips.txt`: the clipboard items you starred.
 - `shelf.txt`: the files on the Shelf tab, one full path per line.

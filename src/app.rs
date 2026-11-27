@@ -121,6 +121,13 @@ const T_BPEEK: usize = 23;
 const T_RADIO: usize = 24;
 /// How long a station may take to open before Nock gives up on it.
 const RADIO_CONNECT_MS: u32 = 10_000;
+/// One-shot, 15 s after an opened stream starts buffering: the connection was lost.
+/// Killed when it plays again (or is paused, stopped or fails).
+const T_RSTALL: usize = 25;
+/// How long an opened stream may sit in Buffering before Nock gives up on it.
+const RADIO_STALL_MS: u32 = 15_000;
+/// What the strip says when an opened stream dropped (stall timeout, ended, failed).
+const RADIO_LOST: &str = "Connection lost";
 /// Station rows the Radio tab shows at once.
 pub const RADIO_ROWS: usize = 4;
 /// How long a peek lasts, seconds.
@@ -1205,6 +1212,7 @@ impl App {
             T_EYES => self.eye_reminder(),
             T_BPEEK => self.on_peek_timer(),
             T_RADIO => self.on_radio_timeout(),
+            T_RSTALL => self.on_radio_stall(),
             T_DOTS => {
                 self.kill_timer(T_DOTS);
                 self.cycle_until = None;
@@ -2257,8 +2265,10 @@ impl App {
         self.rad.now = Some(st);
     }
 
+    /// Drop the player: silent at once, closed off the UI thread (`Player::drop`).
     fn radio_drop_player(&mut self) {
         self.kill_timer(T_RADIO);
+        self.kill_timer(T_RSTALL);
         self.rad.player = None;
     }
 
@@ -2279,36 +2289,42 @@ impl App {
         }
     }
 
+    /// An opened stream sat in Buffering for 15 s: the connection is gone.
+    fn on_radio_stall(&mut self) {
+        self.kill_timer(T_RSTALL);
+        if self.rad.player.is_some() && self.rad.status == RStatus::Buffering {
+            crate::tuner::trace("stall timeout");
+            self.radio_drop_player();
+            self.rad.status = RStatus::Error(RADIO_LOST.into());
+            self.render_radio();
+        }
+    }
+
     /// A player event (`WM_TUNER_PLAY`). Events from a player already dropped are ignored.
+    /// The strip follows pause and resume from the Windows media flyout or Nock's Media
+    /// card too, since those reach Nock only as these events.
     pub fn on_tuner_play(&mut self, gen: usize, lp: isize) {
-        use crate::tuner::{PlayEv, PlayState};
         if self.rad.player.as_ref().map(|p| p.gen) != Some(gen) {
             return;
         }
         let Some(ev) = crate::tuner::decode_event(lp) else { return };
         crate::tuner::trace(&format!("player {gen} {ev:?}"));
-        let opened = self.rad.opened;
-        match ev {
-            PlayEv::Opened => {
-                self.kill_timer(T_RADIO);
-                self.rad.opened = true;
-                if self.rad.status == RStatus::Connecting {
-                    self.rad.status = RStatus::Playing;
-                }
+        let step = radio_step(&self.rad.status, self.rad.opened, ev);
+        self.rad.opened = step.opened;
+        for (id, ms, tm) in [(T_RADIO, RADIO_CONNECT_MS, step.connect), (T_RSTALL, RADIO_STALL_MS, step.stall)] {
+            match tm {
+                Tm::Start => self.set_timer(id, ms),
+                Tm::Kill => self.kill_timer(id),
+                Tm::Keep => {}
             }
-            PlayEv::Failed(f) => {
-                self.radio_drop_player();
-                self.rad.status = RStatus::Error(f.text().into());
-            }
-            PlayEv::State(PlayState::Playing) => {
-                self.kill_timer(T_RADIO);
-                self.rad.opened = true;
-                self.rad.status = RStatus::Playing;
-            }
-            PlayEv::State(PlayState::Buffering) if opened => self.rad.status = RStatus::Buffering,
-            PlayEv::State(PlayState::Paused) if opened => self.rad.status = RStatus::Paused,
-            PlayEv::State(_) => {}
         }
+        if step.drop {
+            self.radio_drop_player();
+        }
+        if let Some(st) = step.status {
+            self.rad.status = st;
+        }
+        crate::tuner::trace(&format!("strip {:?}", self.rad.status));
         self.render_radio();
     }
 
@@ -3241,6 +3257,202 @@ fn delete_word(buf: &mut Vec<u16>) {
     }
     while buf.last().is_some_and(|c| *c != 0x20) {
         buf.pop();
+    }
+}
+
+/// A one-shot radio timer: start it, kill it, or leave it as it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tm {
+    Keep,
+    Start,
+    Kill,
+}
+
+/// What one player event does to the Radio tab.
+#[derive(Clone, PartialEq, Debug)]
+struct RStep {
+    /// the strip's new status (None: unchanged)
+    status: Option<RStatus>,
+    opened: bool,
+    /// the 10 s connect timer (`T_RADIO`) and the 15 s stall timer (`T_RSTALL`)
+    connect: Tm,
+    stall: Tm,
+    /// drop the player
+    drop: bool,
+}
+
+/// The radio's playback rules, kept apart from the window so they can be tested:
+/// - Buffering is not an error. After the stream opened, entering Buffering starts the
+///   15 s stall timer (only on entering, so a repeat does not push it back). Playing,
+///   Paused, a failure and Stop kill it.
+/// - Paused and Playing come from Nock or from outside (the Windows media flyout, the
+///   Media card): the strip shows whichever is true.
+/// - A live stream that ends or fails after it opened lost its connection.
+fn radio_step(status: &RStatus, opened: bool, ev: crate::tuner::PlayEv) -> RStep {
+    use crate::tuner::{Fail, PlayEv, PlayState};
+    let mut r = RStep { status: None, opened, connect: Tm::Keep, stall: Tm::Keep, drop: false };
+    match ev {
+        PlayEv::Opened => {
+            r.connect = Tm::Kill;
+            r.opened = true;
+            if *status == RStatus::Connecting {
+                r.status = Some(RStatus::Playing);
+            }
+        }
+        PlayEv::Failed(f) => {
+            r.drop = true;
+            r.connect = Tm::Kill;
+            r.stall = Tm::Kill;
+            let text = if opened && f != Fail::Format { RADIO_LOST } else { f.text() };
+            r.status = Some(RStatus::Error(text.into()));
+        }
+        PlayEv::Ended => {
+            r.drop = true;
+            r.connect = Tm::Kill;
+            r.stall = Tm::Kill;
+            r.status = Some(RStatus::Error(if opened { RADIO_LOST } else { Fail::Offline.text() }.into()));
+        }
+        PlayEv::State(PlayState::Playing) => {
+            r.connect = Tm::Kill;
+            r.stall = Tm::Kill;
+            r.opened = true;
+            r.status = Some(RStatus::Playing);
+        }
+        PlayEv::State(PlayState::Buffering) if opened => {
+            if *status != RStatus::Buffering {
+                r.stall = Tm::Start;
+            }
+            r.status = Some(RStatus::Buffering);
+        }
+        PlayEv::State(PlayState::Paused) if opened => {
+            r.stall = Tm::Kill;
+            r.status = Some(RStatus::Paused);
+        }
+        PlayEv::State(_) => {}
+    }
+    r
+}
+
+#[cfg(test)]
+mod radio_tests {
+    use super::*;
+    use crate::tuner::{Fail, PlayEv, PlayState};
+
+    const BUF: PlayEv = PlayEv::State(PlayState::Buffering);
+    const PLAY: PlayEv = PlayEv::State(PlayState::Playing);
+    const PAUSE: PlayEv = PlayEv::State(PlayState::Paused);
+
+    /// Feed events from `Connecting`; return the last step and the status reached.
+    fn run(evs: &[PlayEv]) -> (RStep, RStatus) {
+        let (mut st, mut opened) = (RStatus::Connecting, false);
+        let mut last = None;
+        for e in evs {
+            let r = radio_step(&st, opened, *e);
+            opened = r.opened;
+            if let Some(s) = r.status.clone() {
+                st = s;
+            }
+            last = Some(r);
+        }
+        (last.expect("events"), st)
+    }
+
+    #[test]
+    fn opening_kills_the_connect_timer_and_plays() {
+        let (r, st) = run(&[PlayEv::Opened]);
+        assert_eq!((r.connect, r.stall, r.drop), (Tm::Kill, Tm::Keep, false));
+        assert_eq!(st, RStatus::Playing);
+    }
+
+    #[test]
+    fn buffering_before_open_is_not_a_stall() {
+        let (r, st) = run(&[BUF]);
+        assert_eq!(r.stall, Tm::Keep);
+        assert_eq!(st, RStatus::Connecting);
+    }
+
+    #[test]
+    fn buffering_after_open_starts_the_stall_timer_once() {
+        let (r, st) = run(&[PlayEv::Opened, PLAY, BUF]);
+        assert_eq!(r.stall, Tm::Start);
+        assert_eq!(st, RStatus::Buffering);
+        // a second Buffering event must not push the 15 s back
+        let (r, _) = run(&[PlayEv::Opened, PLAY, BUF, BUF]);
+        assert_eq!(r.stall, Tm::Keep);
+    }
+
+    #[test]
+    fn playing_again_kills_the_stall_timer() {
+        let (r, st) = run(&[PlayEv::Opened, PLAY, BUF, PLAY]);
+        assert_eq!((r.stall, r.drop), (Tm::Kill, false));
+        assert_eq!(st, RStatus::Playing);
+    }
+
+    #[test]
+    fn pause_and_resume_from_outside_are_followed() {
+        let (r, st) = run(&[PlayEv::Opened, PLAY, PAUSE]);
+        assert_eq!((r.stall, r.drop), (Tm::Kill, false));
+        assert_eq!(st, RStatus::Paused);
+        let (_, st) = run(&[PlayEv::Opened, PLAY, PAUSE, BUF, PLAY]);
+        assert_eq!(st, RStatus::Playing);
+        // a pause while buffering is not a stall either
+        let (r, st) = run(&[PlayEv::Opened, PLAY, BUF, PAUSE]);
+        assert_eq!((r.stall, st), (Tm::Kill, RStatus::Paused));
+    }
+
+    #[test]
+    fn a_drop_after_playing_is_connection_lost() {
+        for e in [PlayEv::Ended, PlayEv::Failed(Fail::Network), PlayEv::Failed(Fail::Offline)] {
+            let (r, st) = run(&[PlayEv::Opened, PLAY, e]);
+            assert!(r.drop);
+            assert_eq!((r.connect, r.stall), (Tm::Kill, Tm::Kill));
+            assert_eq!(st, RStatus::Error(RADIO_LOST.into()));
+        }
+    }
+
+    #[test]
+    fn a_failure_before_open_keeps_its_own_words() {
+        let (r, st) = run(&[PlayEv::Failed(Fail::Offline)]);
+        assert!(r.drop);
+        assert_eq!(st, RStatus::Error("Station offline".into()));
+        let (_, st) = run(&[PlayEv::Opened, PLAY, PlayEv::Failed(Fail::Format)]);
+        assert_eq!(st, RStatus::Error("Format not supported".into()));
+    }
+
+    #[test]
+    fn timer_ids_are_all_different() {
+        let all = [
+            ("anim", T_ANIM),
+            ("sec", T_SEC),
+            ("min", T_MIN),
+            ("leave", T_LEAVE),
+            ("hover", T_HOVER),
+            ("paste", T_PASTE),
+            ("pop leave", crate::pop::T_POPLEAVE),
+            ("edge", T_EDGE),
+            ("peek", T_PEEK),
+            ("fullscreen", T_FSCHK),
+            ("link", crate::pop::T_LINK),
+            ("tip", crate::pop::T_TIP),
+            ("link msg", crate::pop::T_LINKMSG),
+            ("buddy", crate::buddy::T_BUDDY),
+            ("buddy wake", crate::buddy::T_BWAKE),
+            ("scene", crate::scene::T_SCENE),
+            ("scene anim", crate::scene::T_SCENEANIM),
+            ("stats", T_STATS),
+            ("game", T_GAME),
+            ("water", T_WATER),
+            ("eyes", T_EYES),
+            ("dots", T_DOTS),
+            ("buddy peek", T_BPEEK),
+            ("radio connect", T_RADIO),
+            ("radio stall", T_RSTALL),
+        ];
+        for (i, (na, a)) in all.iter().enumerate() {
+            for (nb, b) in &all[i + 1..] {
+                assert_ne!(a, b, "{na} and {nb} use the same timer id");
+            }
+        }
     }
 }
 

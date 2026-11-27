@@ -441,6 +441,8 @@ pub enum PlayEv {
     Opened,
     Failed(Fail),
     State(PlayState),
+    /// `MediaEnded`: a live stream has no end, so the station closed the connection.
+    Ended,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -492,6 +494,7 @@ pub fn encode_event(e: PlayEv) -> isize {
         PlayEv::Opened => (1, 0),
         PlayEv::Failed(f) => (2, f as isize),
         PlayEv::State(s) => (3, s as isize),
+        PlayEv::Ended => (4, 0),
     };
     kind | (v << 8)
 }
@@ -502,6 +505,7 @@ pub fn decode_event(lp: isize) -> Option<PlayEv> {
         1 => PlayEv::Opened,
         2 => PlayEv::Failed([Fail::Offline, Fail::Format, Fail::Network].get(v).copied().unwrap_or(Fail::Offline)),
         3 => PlayEv::State([PlayState::Opening, PlayState::Buffering, PlayState::Playing, PlayState::Paused, PlayState::Other].get(v).copied().unwrap_or(PlayState::Other)),
+        4 => PlayEv::Ended,
         _ => return None,
     })
 }
@@ -541,6 +545,10 @@ impl Player {
             post(PlayEv::Failed(Fail::classify(err, hr)));
             Ok(())
         }))?;
+        mp.MediaEnded(&TypedEventHandler::new(move |_, _| {
+            post(PlayEv::Ended);
+            Ok(())
+        }))?;
         mp.PlaybackSession()?.PlaybackStateChanged(&TypedEventHandler::new(move |s: Ref<MediaPlaybackSession>, _| {
             let st = match s.ok().and_then(|s| s.PlaybackState()) {
                 Ok(MediaPlaybackState::Opening) => PlayState::Opening,
@@ -574,11 +582,31 @@ impl Player {
 }
 
 impl Drop for Player {
+    /// Silence at once on the calling (UI) thread, then let a short-lived thread do the
+    /// slow part: `Close` takes about 0.3 s and would freeze the panel. The thread exits
+    /// as soon as the player is closed and released.
     fn drop(&mut self) {
         let t = std::time::Instant::now();
+        let _ = self.mp.SetIsMuted(true);
         let _ = self.mp.Pause();
-        let _ = self.mp.Close();
-        trace(&format!("player {} closed in {} ms", self.gen, t.elapsed().as_millis()));
+        let gen = self.gen;
+        trace(&format!("player {gen} silent in {} ms", t.elapsed().as_millis()));
+        let mp = self.mp.clone();
+        let spawned = std::thread::Builder::new().name("nock-radio-close".into()).spawn(move || {
+            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+            let t = std::time::Instant::now();
+            let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+            let _ = mp.Close();
+            drop(mp);
+            if com {
+                unsafe { CoUninitialize() };
+            }
+            trace(&format!("player {gen} closed off the UI thread in {} ms", t.elapsed().as_millis()));
+        });
+        if spawned.is_err() {
+            // no thread to be had: close here rather than leave the player open
+            let _ = self.mp.Close();
+        }
     }
 }
 
@@ -898,6 +926,7 @@ mod tests {
             PlayEv::State(PlayState::Playing),
             PlayEv::State(PlayState::Paused),
             PlayEv::State(PlayState::Other),
+            PlayEv::Ended,
         ];
         for e in all {
             assert_eq!(decode_event(encode_event(e)), Some(e));
