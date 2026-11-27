@@ -1,4 +1,6 @@
-# Nock Radio: spec v1
+# Nock Radio: spec v1.1
+
+Changed in v1.1 (after T1): title via MediaPlaybackItem, 10 s connect timeout, Buffering is not an error, HLS flag, criteria 6 and 7 reworded, clippy lint fix allowed.
 
 Owner: PM. Engineer: read this, never edit it. Report problems instead.
 
@@ -31,16 +33,20 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 ### How to fetch
 
 - Reuse the `sys::powershell` pattern from `cal.rs` (`Invoke-WebRequest`), run on a short-lived thread that exits when done, then post one window message to the UI.
-- Have PowerShell convert the JSON to one line per station (`uuid|name|countrycode|codec|bitrate|tags|url_resolved`) so Rust needs no JSON crate. Strip `|` and newlines from fields.
+- Have PowerShell convert the JSON to one line per station so Rust needs no JSON crate, in this order: `uuid|name|countrycode|codec|bitrate|hls|tags|url_resolved`. Strip `|` and newlines from fields. Radio Browser can mislabel HLS as AAC and report bitrate 0: show the bitrate only when it is above 0, and show `HLS` when `hls` is 1.
 - **Security:** search text is user input. Never splice it raw into the PowerShell script. URL-encode it in Rust and pass it so a `'`, `;` or `$(...)` can't run code. Add a unit test with hostile input.
 - Network only on user action: opening the tab (Top list), a search, or pressing play. Nothing in the background, nothing at start-up.
 
 ## Playback
 
-- WinRT `Windows.Media.Playback.MediaPlayer` (add the needed `windows` crate features, for example `Media_Playback`, `Media_Core`). No new crates.
+- WinRT `Windows.Media.Playback.MediaPlayer`. Add the `windows` features `Media`, `Media_Core`, `Media_Playback` to the product build. No new crates.
 - Create the player on first play and drop it on stop. No player object exists while radio is stopped.
-- React to `MediaFailed` and playback-state events by posting a window message (new `WM_APP + n`). No polling.
-- Media session: if the player shows up in Windows media controls, set its display title to the station name and artist to the country. Nock's own Media card should then show it. If an unpackaged app can't do this, report it. Then the Radio tab's now-playing strip is the only display, and that is acceptable for v1.
+- Wrap the source in a `MediaPlaybackItem` and set its display properties (title = station name, artist = country) before playing. Do not use `DisplayUpdater` before `MediaOpened`: T1 showed it gets wiped.
+- Event handlers run on worker threads. They only post a window message (new `WM_APP + n`) to the UI thread. No polling.
+- **Connect timeout:** `MediaFailed` doesn't fire for a host that silently drops the connection. On Play, start a one-shot 10 s window timer. Kill it on `MediaOpened`. If it fires, stop the player and show "Station not responding". This is a one-shot timer, not polling.
+- `MediaFailed` gives only a code. Nock writes its own short error text ("Station offline", "Format not supported", "Network error").
+- Buffering is not an error. Playback state flips between Buffering and Playing while audio keeps going. Show "Buffering..." in the strip, never an error.
+- Media session: T1 confirmed that the stream shows in Windows media sessions and in Nock's Media card with no AUMID setup.
 
 ## Storage
 
@@ -60,8 +66,9 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 3. Clicking a station plays audio within about 5 s for a typical MP3 or AAC stream. Stop silences it right away.
 4. A dead stream shows an error line and does not freeze or crash Nock.
 5. Starring a station adds it to Favorites, and it is still there after restarting Nock.
-6. With radio stopped, Nock's idle CPU stays at 0% and no `tuner` thread or player exists.
-7. While playing, Nock's CPU and memory are measured and reported (target: under 2% CPU, under 40 MB extra).
+6. With radio stopped: Nock's CPU is 0%, no player object exists, and no thread created by Nock code is alive. Threads and memory that Media Foundation keeps after a first play are accepted (T1: about 26 threads).
+7. While playing, measured inside Nock: under 2% of one core, and under 20 MB extra **private bytes** versus Nock before the first play.
 8. Hostile search input (`'; Remove-Item x; '`, `$(calc)`) runs nothing.
-9. `cargo build --release`, `cargo test`, `cargo clippy` pass. The preview test renders the Radio tab.
+9. `cargo build --release`, `cargo test`, `cargo clippy` pass. The preview test renders the Radio tab. (`cargo clippy` fails on upstream main at `src/games.rs:554`, `6.28` as approx_constant. The Engineer may fix that one line with `std::f32::consts::TAU` or similar, in its own commit.)
+11. A station that never answers shows "Station not responding" within about 10 s.
 10. `radio=0` hides the tab.
