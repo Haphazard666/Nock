@@ -551,7 +551,7 @@ impl Slicer {
                 vy,
                 r: if kind == 4 { 11.0 } else { 13.0 },
                 kind,
-                rot: self.rng.range(0.0, 6.28),
+                rot: self.rng.range(0.0, std::f32::consts::TAU),
                 spin: self.rng.range(-4.0, 4.0),
             });
         }
