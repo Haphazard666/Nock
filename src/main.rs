@@ -26,9 +26,8 @@ mod radio;
 mod store;
 #[cfg(windows)]
 mod sys;
-// Nock Radio directory client. Not wired into the UI until T3.
+// Nock Radio: the station directory client and the player behind the Radio tab.
 #[cfg(windows)]
-#[allow(dead_code)]
 mod tuner;
 #[cfg(windows)]
 mod ui;

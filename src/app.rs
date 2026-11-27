@@ -117,6 +117,12 @@ const T_EYES: usize = 21;
 const T_DOTS: usize = 22;
 /// One-shot, rare (3 to 8 minutes): the next buddy peek over the notch.
 const T_BPEEK: usize = 23;
+/// One-shot, 10 s after pressing play: the station never answered (no `MediaOpened`).
+const T_RADIO: usize = 24;
+/// How long a station may take to open before Nock gives up on it.
+const RADIO_CONNECT_MS: u32 = 10_000;
+/// Station rows the Radio tab shows at once.
+pub const RADIO_ROWS: usize = 4;
 /// How long a peek lasts, seconds.
 const PEEK_SECS: f32 = 1.5;
 
@@ -131,10 +137,13 @@ pub enum Page {
     Game,
     Stats,
     Power,
+    Radio,
 }
 
-pub const PAGES: [Page; 9] = [
+/// Every tab, in order. The Radio tab is left out when `radio=0` (see `App::pages`).
+pub const PAGES: [Page; 10] = [
     Page::Media,
+    Page::Radio,
     Page::Controls,
     Page::Tasks,
     Page::Stats,
@@ -198,6 +207,117 @@ pub enum Act {
     ShelfItem(usize),
     ShelfDel(usize),
     ShelfClear,
+    /// Radio tab: show the Top / Search / Favorites list
+    RadioList(RList),
+    /// click the search box, then type; Enter searches
+    RadioSearch,
+    RadioSearchClear,
+    /// play the n-th station of the list shown / star or unstar it
+    RadioPlay(usize),
+    RadioStar(usize),
+    /// the now-playing strip's button: stop, resume, or play the last station again
+    RadioToggle,
+    /// the list could not be loaded: ask again
+    RadioRetry,
+}
+
+/// Which list the Radio tab shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RList {
+    #[default]
+    Top,
+    Search,
+    Favs,
+}
+
+/// What the now-playing strip says.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub enum RStatus {
+    /// nothing playing (never played, or stopped)
+    #[default]
+    Idle,
+    /// pressed play, the station has not opened yet
+    Connecting,
+    /// opened, waiting for data (not an error: it flips back to Playing by itself)
+    Buffering,
+    Playing,
+    /// paused from the Windows media flyout or Nock's Media card
+    Paused,
+    Error(String),
+}
+
+/// The Radio tab's state. The player only exists while a station plays.
+#[derive(Default)]
+pub struct RadioUi {
+    pub list: RList,
+    /// None = not loaded yet
+    pub top: Option<Vec<crate::tuner::Station>>,
+    pub search: Option<Vec<crate::tuner::Station>>,
+    pub favs: Vec<crate::tuner::Station>,
+    pub favs_loaded: bool,
+    /// fetches still running (their ids)
+    pub top_fetch: Option<usize>,
+    pub search_fetch: Option<usize>,
+    /// the last fetch of that list failed
+    pub top_err: bool,
+    pub search_err: bool,
+    /// text in the search box, and the text the shown results are for
+    pub query: String,
+    pub searched: String,
+    pub scroll: usize,
+    pub player: Option<crate::tuner::Player>,
+    /// the station playing, or last played
+    pub now: Option<crate::tuner::Station>,
+    pub status: RStatus,
+    /// the current player has opened its stream
+    pub opened: bool,
+    /// counts players, so events from an old one are ignored
+    pub gen: usize,
+    /// the country the Top list is for (the Windows region), if any
+    pub country: Option<String>,
+}
+
+impl RadioUi {
+    /// The stations of the list shown (empty while it loads).
+    pub fn view(&self) -> &[crate::tuner::Station] {
+        match self.list {
+            RList::Top => self.top.as_deref().unwrap_or(&[]),
+            RList::Search => self.search.as_deref().unwrap_or(&[]),
+            RList::Favs => &self.favs,
+        }
+    }
+
+    /// The list shown is waiting for the directory.
+    pub fn loading(&self) -> bool {
+        match self.list {
+            RList::Top => self.top_fetch.is_some(),
+            RList::Search => self.search_fetch.is_some(),
+            RList::Favs => false,
+        }
+    }
+
+    /// The list shown failed to load.
+    pub fn failed(&self) -> bool {
+        match self.list {
+            RList::Top => self.top_err && self.top_fetch.is_none(),
+            RList::Search => self.search_err && self.search_fetch.is_none(),
+            RList::Favs => false,
+        }
+    }
+
+    pub fn is_fav(&self, st: &crate::tuner::Station) -> bool {
+        self.favs.iter().any(|f| f.url == st.url)
+    }
+
+    /// A station is playing, connecting, buffering or paused (a player exists for it).
+    pub fn active(&self) -> bool {
+        matches!(self.status, RStatus::Connecting | RStatus::Buffering | RStatus::Playing | RStatus::Paused)
+    }
+
+    /// The station in the list is the one playing (or connecting).
+    pub fn is_now(&self, st: &crate::tuner::Station) -> bool {
+        self.active() && self.now.as_ref().is_some_and(|n| n.url == st.url)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -443,6 +563,8 @@ pub struct App {
     /// minutes since the calendar link was fetched, and the meeting already announced
     cal_age: u16,
     cal_seen: Option<(i64, u8)>,
+    /// the Radio tab: lists, search, the player and its state
+    pub rad: RadioUi,
 }
 
 enum AlertAct {
@@ -588,6 +710,7 @@ impl App {
             cal_age: 60,
             cal_seen: None,
             active_min: 0,
+            rad: RadioUi::default(),
         };
         a.update_monitor();
         sys::watch_mic(hwnd.0 as isize);
@@ -939,6 +1062,8 @@ impl App {
                 Page::Game if self.hub.is_playing() => 16,
                 Page::Stats => 1000,
                 Page::Apps if self.picking && (self.app_list.is_none() || self.app_loading) => 33,
+                // the spinner, only while a station list is loading and on screen
+                Page::Radio if self.rad.loading() => 33,
                 _ => 0,
             }
         } else {
@@ -1079,6 +1204,7 @@ impl App {
             T_WATER => self.water_reminder(),
             T_EYES => self.eye_reminder(),
             T_BPEEK => self.on_peek_timer(),
+            T_RADIO => self.on_radio_timeout(),
             T_DOTS => {
                 self.kill_timer(T_DOTS);
                 self.cycle_until = None;
@@ -1174,6 +1300,9 @@ impl App {
         if on {
             if self.page == Page::Controls {
                 self.refresh_controls();
+            }
+            if self.page == Page::Radio {
+                self.radio_open();
             }
         } else {
             self.page_t = 1.0;
@@ -1689,9 +1818,14 @@ impl App {
         }
         if y < crate::ui::CONTENT_Y {
             // over the tab row: switch pages
-            let i = PAGES.iter().position(|p| *p == self.page).unwrap_or(0) as i32;
-            let n = (i + if delta < 0 { 1 } else { -1 }).clamp(0, PAGES.len() as i32 - 1);
-            self.select_page(PAGES[n as usize]);
+            let pages = self.pages();
+            let i = pages.iter().position(|p| *p == self.page).unwrap_or(0) as i32;
+            let n = (i + if delta < 0 { 1 } else { -1 }).clamp(0, pages.len() as i32 - 1);
+            self.select_page(pages[n as usize]);
+        } else if self.page == Page::Radio {
+            let max = self.rad.view().len().saturating_sub(RADIO_ROWS);
+            self.rad.scroll = if delta < 0 { (self.rad.scroll + 1).min(max) } else { self.rad.scroll.saturating_sub(1) };
+            self.render();
         } else if self.page == Page::Apps && self.picking {
             let max = self.app_view().len().saturating_sub(PICK_ROWS);
             self.app_scroll = if delta < 0 { (self.app_scroll + 1).min(max) } else { self.app_scroll.saturating_sub(1) };
@@ -1718,6 +1852,9 @@ impl App {
         self.page_t = if self.expanded { 0.0 } else { 1.0 };
         if p == Page::Controls {
             self.refresh_controls();
+        }
+        if p == Page::Radio {
+            self.radio_open();
         }
         if p != Page::Apps {
             self.picking = false;
@@ -1974,7 +2111,224 @@ impl App {
                 self.start_entry();
                 self.entry_timer = self.entering.is_some();
             }
+            Act::RadioList(l) => {
+                self.rad.list = l;
+                self.rad.scroll = 0;
+                self.sync_timers();
+            }
+            Act::RadioSearch => {
+                self.rad.list = RList::Search;
+                self.rad.scroll = 0;
+                self.start_entry();
+                if self.entering.is_some() {
+                    self.entry_search = true;
+                    self.entering = Some(self.rad.query.encode_utf16().collect());
+                }
+                self.sync_timers();
+            }
+            Act::RadioSearchClear => {
+                self.rad.query.clear();
+                self.rad.searched.clear();
+                self.rad.search = None;
+                self.rad.search_fetch = None;
+                self.rad.search_err = false;
+                self.rad.scroll = 0;
+                self.sync_timers();
+            }
+            Act::RadioPlay(i) => {
+                if let Some(st) = self.rad.view().get(i).cloned() {
+                    if self.rad.is_now(&st) {
+                        match (&self.rad.player, &self.rad.status) {
+                            (Some(p), RStatus::Paused) => p.resume(),
+                            _ => self.radio_stop(),
+                        }
+                    } else {
+                        self.radio_play(st);
+                    }
+                }
+            }
+            Act::RadioStar(i) => {
+                if let Some(st) = self.rad.view().get(i).cloned() {
+                    self.radio_star(st);
+                }
+            }
+            Act::RadioToggle => match (&self.rad.player, &self.rad.status) {
+                (Some(p), RStatus::Paused) => p.resume(),
+                (Some(_), _) => self.radio_stop(),
+                (None, _) => {
+                    if let Some(st) = self.rad.now.clone() {
+                        self.radio_play(st);
+                    }
+                }
+            },
+            Act::RadioRetry => {
+                match self.rad.list {
+                    RList::Top => {
+                        self.rad.top_err = false;
+                        self.radio_open();
+                    }
+                    _ => {
+                        let q = self.rad.searched.clone();
+                        self.radio_search(&q);
+                    }
+                }
+                self.sync_timers();
+            }
         }
+    }
+
+    // --------------------------------------------------------------- radio --
+
+    /// The tabs shown, in order (`radio=0` leaves out the Radio tab).
+    pub fn pages(&self) -> Vec<Page> {
+        PAGES.iter().copied().filter(|p| *p != Page::Radio || self.cfg.radio).collect()
+    }
+
+    /// The Radio tab came into view: load the favorites once, and the Top list for the
+    /// user's country if it is not loaded (or failed last time). This, a search and play
+    /// are the only things that use the network.
+    fn radio_open(&mut self) {
+        if !self.rad.favs_loaded {
+            self.rad.favs = crate::tuner::load_favorites();
+            self.rad.favs_loaded = true;
+        }
+        if self.rad.top.is_none() && self.rad.top_fetch.is_none() {
+            crate::tuner::trace("radio tab opened: loading Top");
+            self.rad.top_err = false;
+            self.rad.country = crate::tuner::default_country();
+            self.rad.top_fetch = Some(crate::tuner::fetch(self.hwnd.0 as isize, crate::tuner::Query::Top(self.rad.country.clone())));
+        }
+        self.sync_timers();
+    }
+
+    /// Search for what was typed (a two-letter country code, or a name or genre).
+    fn radio_search(&mut self, text: &str) {
+        let Some(q) = crate::tuner::query_for(text) else { return };
+        self.rad.list = RList::Search;
+        self.rad.searched = text.trim().to_string();
+        self.rad.search = None;
+        self.rad.search_err = false;
+        self.rad.scroll = 0;
+        self.rad.search_fetch = Some(crate::tuner::fetch(self.hwnd.0 as isize, q));
+        self.sync_timers();
+    }
+
+    /// A directory fetch finished (`WM_TUNER`).
+    pub fn on_tuner(&mut self, id: usize) {
+        let Some(f) = crate::tuner::take(id) else { return };
+        crate::tuner::trace(&format!("list {id} arrived {:?}", f.query));
+        if self.rad.top_fetch == Some(id) {
+            self.rad.top_fetch = None;
+            match f.result {
+                Ok(v) => self.rad.top = Some(v),
+                Err(_) => self.rad.top_err = true,
+            }
+        } else if self.rad.search_fetch == Some(id) {
+            self.rad.search_fetch = None;
+            match f.result {
+                Ok(v) => self.rad.search = Some(v),
+                Err(_) => self.rad.search_err = true,
+            }
+        } else {
+            return; // an older fetch nobody waits for
+        }
+        crate::tuner::trace(&format!("list {id} shown"));
+        self.sync_timers();
+        if self.expanded && self.page == Page::Radio {
+            self.render();
+        }
+    }
+
+    /// Play a station: a new player (the old one is dropped first), the 10 s connect
+    /// timeout, and the click-count call Radio Browser asks for.
+    fn radio_play(&mut self, st: crate::tuner::Station) {
+        self.radio_drop_player();
+        self.rad.gen += 1;
+        self.rad.opened = false;
+        match crate::tuner::Player::start(self.hwnd.0 as isize, &st, self.rad.gen) {
+            Ok(p) => {
+                self.rad.player = Some(p);
+                self.rad.status = RStatus::Connecting;
+                self.set_timer(T_RADIO, RADIO_CONNECT_MS);
+                crate::tuner::click(&st.uuid);
+            }
+            Err(_) => self.rad.status = RStatus::Error(crate::tuner::Fail::Offline.text().into()),
+        }
+        self.rad.now = Some(st);
+    }
+
+    fn radio_drop_player(&mut self) {
+        self.kill_timer(T_RADIO);
+        self.rad.player = None;
+    }
+
+    /// Stop: the player is dropped, so nothing of it is left running.
+    fn radio_stop(&mut self) {
+        self.radio_drop_player();
+        self.rad.status = RStatus::Idle;
+    }
+
+    /// The station never opened within 10 s.
+    fn on_radio_timeout(&mut self) {
+        self.kill_timer(T_RADIO);
+        if self.rad.player.is_some() && !self.rad.opened {
+            crate::tuner::trace("connect timeout");
+            self.radio_drop_player();
+            self.rad.status = RStatus::Error("Station not responding".into());
+            self.render_radio();
+        }
+    }
+
+    /// A player event (`WM_TUNER_PLAY`). Events from a player already dropped are ignored.
+    pub fn on_tuner_play(&mut self, gen: usize, lp: isize) {
+        use crate::tuner::{PlayEv, PlayState};
+        if self.rad.player.as_ref().map(|p| p.gen) != Some(gen) {
+            return;
+        }
+        let Some(ev) = crate::tuner::decode_event(lp) else { return };
+        crate::tuner::trace(&format!("player {gen} {ev:?}"));
+        let opened = self.rad.opened;
+        match ev {
+            PlayEv::Opened => {
+                self.kill_timer(T_RADIO);
+                self.rad.opened = true;
+                if self.rad.status == RStatus::Connecting {
+                    self.rad.status = RStatus::Playing;
+                }
+            }
+            PlayEv::Failed(f) => {
+                self.radio_drop_player();
+                self.rad.status = RStatus::Error(f.text().into());
+            }
+            PlayEv::State(PlayState::Playing) => {
+                self.kill_timer(T_RADIO);
+                self.rad.opened = true;
+                self.rad.status = RStatus::Playing;
+            }
+            PlayEv::State(PlayState::Buffering) if opened => self.rad.status = RStatus::Buffering,
+            PlayEv::State(PlayState::Paused) if opened => self.rad.status = RStatus::Paused,
+            PlayEv::State(_) => {}
+        }
+        self.render_radio();
+    }
+
+    fn render_radio(&mut self) {
+        if self.expanded && self.page == Page::Radio && self.anim_ms == 0 {
+            self.render();
+        }
+    }
+
+    /// Star or unstar a station; favorites are saved at once.
+    fn radio_star(&mut self, st: crate::tuner::Station) {
+        if self.rad.is_fav(&st) {
+            self.rad.favs.retain(|f| f.url != st.url);
+            if self.rad.list == RList::Favs {
+                self.rad.scroll = self.rad.scroll.min(self.rad.favs.len().saturating_sub(RADIO_ROWS));
+            }
+        } else {
+            self.rad.favs.push(st);
+        }
+        crate::tuner::save_favorites(&self.rad.favs);
     }
 
     fn on_game_tick(&mut self) {
@@ -2114,7 +2468,15 @@ impl App {
         self.make_activatable(false);
         let timer = std::mem::take(&mut self.entry_timer);
         let search = std::mem::take(&mut self.entry_search);
-        if search && !commit {
+        if search && self.page == Page::Radio {
+            // Enter searches; Esc puts back the text of the results shown
+            if commit {
+                let q = self.rad.query.clone();
+                self.radio_search(&q);
+            } else {
+                self.rad.query = self.rad.searched.clone();
+            }
+        } else if search && !commit {
             // Esc drops the filter; Enter keeps it
             if self.page == Page::Apps {
                 self.app_filter.clear();
@@ -2186,7 +2548,9 @@ impl App {
         if self.entry_search {
             if let Some(buf) = &self.entering {
                 let t = String::from_utf16_lossy(buf);
-                if self.page == Page::Apps {
+                if self.page == Page::Radio {
+                    self.rad.query = t; // typing only; the search runs on Enter
+                } else if self.page == Page::Apps {
                     self.app_filter = t;
                     self.app_scroll = 0;
                 } else {
@@ -2295,8 +2659,9 @@ impl App {
 
     /// Put the tab highlight straight under the current page (no slide).
     pub(crate) fn snap_tab(&mut self) {
-        if let Some(i) = PAGES.iter().position(|p| *p == self.page) {
-            let r = crate::ui::tab_rects()[i];
+        let pages = self.pages();
+        if let Some(i) = pages.iter().position(|p| *p == self.page) {
+            let r = crate::ui::tab_rects(&pages)[i];
             self.tab_x = r.x;
             self.tab_w = r.w;
         }
@@ -2310,8 +2675,9 @@ impl App {
             return fading;
         }
         let mut busy = false;
-        if let Some(i) = PAGES.iter().position(|p| *p == self.page) {
-            let r = crate::ui::tab_rects()[i];
+        let pages = self.pages();
+        if let Some(i) = pages.iter().position(|p| *p == self.page) {
+            let r = crate::ui::tab_rects(&pages)[i];
             let k = (dt * 20.0).min(1.0);
             self.tab_x += (r.x - self.tab_x) * k;
             self.tab_w += (r.w - self.tab_w) * k;
@@ -2967,6 +3333,84 @@ mod preview {
             a.snap_tab();
             (a.stat_cpu, a.stat_mem, a.bar_cpu, a.bar_mem) = (23, 61, 0.23, 0.61);
             render(&a, &name);
+        }
+        // the Radio tab: empty, loading, a list, playing, buffering, errors, search, favorites
+        {
+            use crate::tuner::Station;
+            let st = |uuid: &str, name: &str, cc: &str, codec: &str, bitrate: u32, hls: bool| Station {
+                uuid: uuid.into(),
+                name: name.into(),
+                countrycode: cc.into(),
+                codec: codec.into(),
+                bitrate,
+                hls,
+                tags: String::new(),
+                url: format!("https://stream.example/{uuid}"),
+            };
+            let list = vec![
+                st("a1", "Harbour Jazz Lounge", "DE", "MP3", 128, false),
+                st("a2", "Morning News Radio", "GB", "AAC", 64, true),
+                st("a3", "Late Night Classics", "FR", "MP3", 0, false),
+                st("a4", "Coastline FM", "IL", "AAC", 96, false),
+                st("a5", "Hill Country Folk", "US", "OGG", 112, false),
+                st("a6", "Radio Example Uno", "IT", "MP3", 192, false),
+            ];
+            a.page = Page::Radio;
+            a.snap_tab();
+            a.rad.country = Some("DE".into());
+            a.rad.favs_loaded = true;
+            a.rad.list = RList::Search;
+            render(&a, "radio_empty");
+            a.rad.list = RList::Favs;
+            render(&a, "radio_favs_empty");
+            a.rad.list = RList::Top;
+            a.rad.top_fetch = Some(1);
+            a.spin_t = 0.4;
+            render(&a, "radio_loading");
+            a.rad.top_fetch = None;
+            a.rad.top_err = true;
+            render(&a, "radio_list_error");
+            a.rad.top_err = false;
+            a.rad.top = Some(list.clone());
+            a.rad.favs = vec![list[0].clone(), list[3].clone()];
+            render(&a, "radio_list");
+            a.rad.now = Some(list[1].clone());
+            a.rad.status = RStatus::Connecting;
+            render(&a, "radio_connecting");
+            a.rad.status = RStatus::Playing;
+            a.hot = Some(Act::RadioPlay(2));
+            a.hover = vec![(Act::RadioPlay(2), 1.0)];
+            render(&a, "radio_playing");
+            a.hot = None;
+            a.hover.clear();
+            a.rad.status = RStatus::Buffering;
+            render(&a, "radio_buffering");
+            a.rad.status = RStatus::Paused;
+            render(&a, "radio_paused");
+            a.rad.now = Some(list[2].clone());
+            a.rad.status = RStatus::Error("Station not responding".into());
+            render(&a, "radio_error");
+            a.rad.status = RStatus::Error("Format not supported".into());
+            render(&a, "radio_error_format");
+            a.rad.status = RStatus::Idle;
+            render(&a, "radio_stopped");
+            a.rad.list = RList::Search;
+            a.rad.query = "jazz".into();
+            a.entry_search = true;
+            render(&a, "radio_search_typing");
+            a.entry_search = false;
+            a.rad.searched = "jazz".into();
+            a.rad.search = Some(vec![list[0].clone(), list[4].clone(), list[5].clone()]);
+            render(&a, "radio_search");
+            a.rad.list = RList::Favs;
+            render(&a, "radio_favs");
+            // radio=0: the tab row without the Radio tab
+            a.cfg.radio = false;
+            a.page = Page::Media;
+            a.snap_tab();
+            render(&a, "radio_hidden_tabs");
+            a.cfg.radio = true;
+            a.rad = RadioUi::default();
         }
         // Next pressed: the old track stays up with a spinner while the player loads
         a.page = Page::Media;

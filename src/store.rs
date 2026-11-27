@@ -2,7 +2,7 @@
 //!   config.ini  – a few switches
 //!   apps.txt    – pinned launcher entries, one per line:  Name|target|optional args
 //!   todos.txt   – the to-do list, one per line:           0|text   (1 = done)
-//!   stations.txt – radio favorites, one per line:  name|url_resolved|uuid|countrycode|codec|bitrate
+//!   stations.txt – radio favorites, one per line:  name|url_resolved|uuid|countrycode|codec|bitrate|hls (hls optional)
 
 use std::fs;
 use std::path::PathBuf;
@@ -98,6 +98,8 @@ pub struct Config {
     pub auto_close: bool,
     /// Which display the notch and bar live on: 0 = primary, 1.. = that display.
     pub monitor: u8,
+    /// Show the Radio tab (internet radio stations).
+    pub radio: bool,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -158,6 +160,8 @@ idle_cycle=0
 state_dot=0
 # now and then the buddy peeks over the bottom edge of the notch (robot and kitty): 1 = on
 peek=0
+# Radio tab (internet radio): 1 = shown, 0 = hidden
+radio=1
 ";
 
 pub fn load_config() -> Config {
@@ -201,6 +205,7 @@ pub fn load_config() -> Config {
         peek: false,
         calendar_url: String::new(),
         monitor: 0,
+        radio: true,
     };
     for line in text.lines() {
         let line = line.trim();
@@ -234,6 +239,7 @@ pub fn load_config() -> Config {
                 "idle_cycle" => cfg.idle_cycle = on,
                 "state_dot" => cfg.state_dot = on,
                 "peek" => cfg.peek = on,
+                "radio" => cfg.radio = on,
                 "calendar_url" => cfg.calendar_url = v.trim().to_string(),
                 "eye_min" => cfg.eye_min = v.trim().parse::<u16>().unwrap_or(0).min(600),
                 "clock_style" => cfg.clock_style = v.trim().parse::<u8>().unwrap_or(0).min(3),
@@ -252,7 +258,7 @@ pub fn load_config() -> Config {
     }
     // A config file from an older version lacks the newer settings: write the
     // file back with every setting present (keeping the user's values).
-    let keys = ["hover_expand", "eq_animation", "clock_24h", "reserve_space", "top_bar", "buddy", "scenes", "scene_min", "stats", "clock_style", "water_min", "auto_break", "eye_min", "start_menu", "fs_hide", "auto_hide", "smart_hide", "auto_close", "smart", "calendar_url", "smart_sound", "monitor", "idle_glance", "idle_focus_bar", "idle_meeting_hours", "day_line", "day_start", "day_end", "idle_cycle", "state_dot", "peek"];
+    let keys = ["hover_expand", "eq_animation", "clock_24h", "reserve_space", "top_bar", "buddy", "scenes", "scene_min", "stats", "clock_style", "water_min", "auto_break", "eye_min", "start_menu", "fs_hide", "auto_hide", "smart_hide", "auto_close", "smart", "calendar_url", "smart_sound", "monitor", "idle_glance", "idle_focus_bar", "idle_meeting_hours", "day_line", "day_start", "day_end", "idle_cycle", "state_dot", "peek", "radio"];
     let present = |k: &str| text.lines().any(|l| l.trim().split_once('=').map(|(a, _)| a.trim() == k).unwrap_or(false));
     if keys.iter().any(|k| !present(k)) {
         save_config(&cfg);
@@ -263,7 +269,7 @@ pub fn load_config() -> Config {
 pub fn save_config(c: &Config) {
     let b = |v: bool| if v { 1 } else { 0 };
     let text = format!(
-        "# Nock settings (1 = on, 0 = off)\nhover_expand={}\neq_animation={}\nclock_24h={}\nreserve_space={}\ntop_bar={}\n# buddy: 0 = off, 2 = cat, 5 = robot, 6 = ronin, 7 = courier, 8 = necromancer (1, 3 and 4 were retired and now give the robot)\nbuddy={}\n# fight scenes now and then (needs a buddy): 1 = on\nscenes={}\n# average minutes between scenes (1 to 60)\nscene_min={}\n# CPU and memory read-out on the top bar: 1 = on\nstats={}\n# top bar clock: 0 = digital, 1 = analog, 2 = binary, 3 = countdown to Friday\nclock_style={}\n# minutes between water reminders (0 = off)\nwater_min={}\n# after a focus session start a 5 minute break, then focus again: 1 = on\nauto_break={}\n# minutes between look-away reminders for your eyes (0 = off)\neye_min={}\n# a Start Menu shortcut so typing Nock in Windows search finds it: 1 = on\nstart_menu={}\n# hide the notch and bar while a full-screen app or game is in front: 1 = on\nfs_hide={}\n# keep the notch and bar hidden until the pointer touches the top edge: 1 = on\nauto_hide={}\n# fade the notch out while a window covers it, and back in when the window moves away: 1 = on\nsmart_hide={}\n# close the open panel when the pointer leaves it or another window comes to the front: 1 = on\nauto_close={}\n# smart notch hints (low battery, take a break after 90 min at the PC, link/code copied): 1 = on\nsmart={}\n# calendar link (Google: Settings > your calendar > Secret address in iCal format) for meeting hints; empty = off\ncalendar_url={}\n# a short chime with meeting, low battery and break hints: 1 = on\nsmart_sound={}\n# display for the notch and bar: 0 = primary, 2 = second display, and so on\nmonitor={}\n# extra beside the idle clock: 0 = off, 1 = tasks left, 2 = focus minutes today, 3 = CPU and RAM, 4 = next meeting\nidle_glance={}\n# progress line on the notch while a focus session runs: 1 = on\nidle_focus_bar={}\n# next meeting glance (idle_glance=4) shows meetings starting within this many hours (1 to 12)\nidle_meeting_hours={}\n# thin line along the bottom of the idle notch: how much of your workday has passed: 1 = on\nday_line={}\n# workday for the day line, in hours (0 to 24)\nday_start={}\nday_end={}\n# scroll up over the idle notch cycles time, date, tasks left and focus today: 1 = on\nidle_cycle={}\n# a state glyph on the notch: dot, ring (mic in use), amber square (battery low), arc (focus session): 1 = on\nstate_dot={}\n# now and then the buddy peeks over the bottom edge of the notch (robot and kitty): 1 = on\npeek={}\n",
+        "# Nock settings (1 = on, 0 = off)\nhover_expand={}\neq_animation={}\nclock_24h={}\nreserve_space={}\ntop_bar={}\n# buddy: 0 = off, 2 = cat, 5 = robot, 6 = ronin, 7 = courier, 8 = necromancer (1, 3 and 4 were retired and now give the robot)\nbuddy={}\n# fight scenes now and then (needs a buddy): 1 = on\nscenes={}\n# average minutes between scenes (1 to 60)\nscene_min={}\n# CPU and memory read-out on the top bar: 1 = on\nstats={}\n# top bar clock: 0 = digital, 1 = analog, 2 = binary, 3 = countdown to Friday\nclock_style={}\n# minutes between water reminders (0 = off)\nwater_min={}\n# after a focus session start a 5 minute break, then focus again: 1 = on\nauto_break={}\n# minutes between look-away reminders for your eyes (0 = off)\neye_min={}\n# a Start Menu shortcut so typing Nock in Windows search finds it: 1 = on\nstart_menu={}\n# hide the notch and bar while a full-screen app or game is in front: 1 = on\nfs_hide={}\n# keep the notch and bar hidden until the pointer touches the top edge: 1 = on\nauto_hide={}\n# fade the notch out while a window covers it, and back in when the window moves away: 1 = on\nsmart_hide={}\n# close the open panel when the pointer leaves it or another window comes to the front: 1 = on\nauto_close={}\n# smart notch hints (low battery, take a break after 90 min at the PC, link/code copied): 1 = on\nsmart={}\n# calendar link (Google: Settings > your calendar > Secret address in iCal format) for meeting hints; empty = off\ncalendar_url={}\n# a short chime with meeting, low battery and break hints: 1 = on\nsmart_sound={}\n# display for the notch and bar: 0 = primary, 2 = second display, and so on\nmonitor={}\n# extra beside the idle clock: 0 = off, 1 = tasks left, 2 = focus minutes today, 3 = CPU and RAM, 4 = next meeting\nidle_glance={}\n# progress line on the notch while a focus session runs: 1 = on\nidle_focus_bar={}\n# next meeting glance (idle_glance=4) shows meetings starting within this many hours (1 to 12)\nidle_meeting_hours={}\n# thin line along the bottom of the idle notch: how much of your workday has passed: 1 = on\nday_line={}\n# workday for the day line, in hours (0 to 24)\nday_start={}\nday_end={}\n# scroll up over the idle notch cycles time, date, tasks left and focus today: 1 = on\nidle_cycle={}\n# a state glyph on the notch: dot, ring (mic in use), amber square (battery low), arc (focus session): 1 = on\nstate_dot={}\n# now and then the buddy peeks over the bottom edge of the notch (robot and kitty): 1 = on\npeek={}\n# Radio tab (internet radio): 1 = shown, 0 = hidden\nradio={}\n",
         b(c.hover_expand),
         b(c.eq_animation),
         b(c.clock_24h),
@@ -294,7 +300,8 @@ pub fn save_config(c: &Config) {
         c.day_end,
         b(c.idle_cycle),
         b(c.state_dot),
-        b(c.peek)
+        b(c.peek),
+        b(c.radio)
     );
     let _ = fs::write(data_dir().join("config.ini"), text);
 }
@@ -385,6 +392,8 @@ pub struct Favorite {
     pub codec: String,
     /// kbps; 0 = unknown.
     pub bitrate: u32,
+    /// The stream is HLS (optional 7th field; older 6-field lines load as false).
+    pub hls: bool,
 }
 
 #[cfg(any(windows, test))]
@@ -415,6 +424,7 @@ pub fn parse_favorites(text: &str) -> Vec<Favorite> {
             countrycode: get(3),
             codec: get(4),
             bitrate: get(5).parse().unwrap_or(0),
+            hls: get(6) == "1",
         });
     }
     out
@@ -425,17 +435,18 @@ pub fn parse_favorites(text: &str) -> Vec<Favorite> {
 pub fn favorites_text(favs: &[Favorite]) -> String {
     let clean = |s: &str| s.replace(['|', '\r', '\n'], " ").trim().to_string();
     let mut text = String::from(
-        "# Nock Radio favorites. One per line:  name|url|uuid|countrycode|codec|bitrate\n# Use the star in the Radio tab, or edit this file.\n",
+        "# Nock Radio favorites. One per line:  name|url|uuid|countrycode|codec|bitrate|hls\n# Use the star in the Radio tab, or edit this file.\n",
     );
     for f in favs {
         text.push_str(&format!(
-            "{}|{}|{}|{}|{}|{}\n",
+            "{}|{}|{}|{}|{}|{}|{}\n",
             clean(&f.name),
             clean(&f.url),
             clean(&f.uuid),
             clean(&f.countrycode),
             clean(&f.codec),
-            f.bitrate
+            f.bitrate,
+            u8::from(f.hls)
         ));
     }
     text
@@ -660,6 +671,7 @@ mod favorite_tests {
             countrycode: "US".into(),
             codec: "AAC".into(),
             bitrate,
+            hls: false,
         }
     }
 
@@ -671,6 +683,30 @@ mod favorite_tests {
             fav("Kan Bet \u{5db}\u{5df}", "https://example.com/kan?x=1&y=2", 64),
         ];
         assert_eq!(parse_favorites(&favorites_text(&favs)), favs);
+        let hls = vec![Favorite { hls: true, ..fav("RTL", "https://live.example/index.m3u8", 64) }];
+        let text = favorites_text(&hls);
+        assert!(text.contains("|AAC|64|1
+"), "{text}");
+        assert_eq!(parse_favorites(&text), hls);
+    }
+
+    #[test]
+    fn six_and_seven_field_lines_both_load() {
+        let text = "Old|https://old.example/a|u1|DE|MP3|128
+New HLS|https://new.example/b.m3u8|u2|FR|AAC|64|1
+New plain|https://new.example/c|u3|IT|MP3|96|0
+Odd flag|https://new.example/d|u4|IT|MP3|96|yes
+";
+        let f = parse_favorites(text);
+        assert_eq!(f.len(), 4);
+        assert_eq!((f[0].name.as_str(), f[0].bitrate, f[0].hls), ("Old", 128, false), "6 fields: hls defaults to 0");
+        assert_eq!((f[1].name.as_str(), f[1].bitrate, f[1].hls), ("New HLS", 64, true), "7 fields: hls=1");
+        assert!(!f[2].hls, "7 fields: hls=0");
+        assert!(!f[3].hls, "anything but 1 is not HLS");
+        // saving always writes all 7 fields
+        for l in favorites_text(&f).lines().filter(|l| !l.starts_with('#')) {
+            assert_eq!(l.split('|').count(), 7, "{l}");
+        }
     }
 
     #[test]

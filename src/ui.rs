@@ -391,19 +391,33 @@ pub fn squash(jiggle: f32) -> (f32, f32) {
     (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k)
 }
 
-const TAB_LABELS: [&str; 9] = ["Media", "Controls", "Today", "Stats", "Clipboard", "Shelf", "Apps", "Games", "Power"];
+/// The tab's label. The Radio tab has an icon instead (see `radio_glyph`).
+fn tab_label(p: Page) -> &'static str {
+    match p {
+        Page::Media => "Media",
+        Page::Radio => "",
+        Page::Controls => "Controls",
+        Page::Tasks => "Today",
+        Page::Stats => "Stats",
+        Page::Clipboard => "Clipboard",
+        Page::Shelf => "Shelf",
+        Page::Apps => "Apps",
+        Page::Game => "Games",
+        Page::Power => "Power",
+    }
+}
 
-/// Where each tab sits in the top row, in the same order as `PAGES`.
-pub fn tab_rects() -> Vec<Rect> {
+/// Where each of these tabs sits in the top row, in the same order.
+pub fn tab_rects(pages: &[Page]) -> Vec<Rect> {
     // rough text width: narrow letters count less, so the gaps between tabs look even
     let text_w = |s: &str| -> f32 {
         s.chars().map(|c| match c { 'i' | 'l' | 't' | 'f' | 'j' | 'r' | 'I' => 3.4, 'm' | 'w' | 'M' | 'W' => 9.6, _ => 6.7 }).sum()
     };
-    let widths: Vec<f32> = TAB_LABELS.iter().map(|l| text_w(l) + 16.0).collect();
+    let widths: Vec<f32> = pages.iter().map(|p| if *p == Page::Radio { 32.0 } else { text_w(tab_label(*p)) + 16.0 }).collect();
     let total: f32 = widths.iter().sum();
     let (left, right) = (46.0, EXP_W - 46.0);
-    let gap = ((right - left - total) / (TAB_LABELS.len() as f32 - 1.0)).clamp(2.0, 12.0);
-    let used = total + gap * (TAB_LABELS.len() as f32 - 1.0);
+    let gap = ((right - left - total) / (pages.len().max(2) as f32 - 1.0)).clamp(2.0, 12.0);
+    let used = total + gap * (pages.len().max(1) as f32 - 1.0);
     let mut x = left + (right - left - used) / 2.0;
     widths
         .iter()
@@ -431,10 +445,11 @@ fn draw_expanded(a: &App, ca: f32, hits: &mut Vec<Hit>) {
 
     // the active-tab highlight slides from tab to tab; each label takes the accent
     // colour in proportion to how much of the highlight is behind it
-    let rects = tab_rects();
+    let pages = a.pages();
+    let rects = tab_rects(&pages);
     let pill = Rect::new(a.tab_x, 8.0, a.tab_w, 28.0);
     g.fill_rrect(pill, 14.0, a.accent.fade(0.20 * ca));
-    for (i, p) in PAGES.iter().enumerate() {
+    for (i, p) in pages.iter().enumerate() {
         let r = rects[i];
         let act = Act::Tab(*p);
         hits.push(Hit { r, act });
@@ -444,7 +459,11 @@ fn draw_expanded(a: &App, ca: f32, hits: &mut Vec<Hit>) {
         }
         let covered = ((pill.x + pill.w).min(r.x + r.w) - pill.x.max(r.x)).max(0.0) / r.w;
         let col = mix(mix(T3, T2, k), a.accent, covered);
-        g.text(TAB_LABELS[i], r, &f.small, col.fade(ca), Align::Center);
+        if *p == Page::Radio {
+            radio_glyph(g, r.cx(), r.cy(), col.fade(ca));
+        } else {
+            g.text(tab_label(*p), r, &f.small, col.fade(ca), Align::Center);
+        }
     }
 
     // the page itself, moved below the tab row; its hit boxes move with it
@@ -458,6 +477,7 @@ fn draw_expanded(a: &App, ca: f32, hits: &mut Vec<Hit>) {
         Page::Tasks => page_tasks(a, ca, hits),
         Page::Stats => page_stats(a, ca),
         Page::Power => page_power(a, ca, hits),
+        Page::Radio => page_radio(a, ca, hits),
         Page::Game => {
             let (ox, oy) = ((EXP_W - crate::game::W) / 2.0, 14.0);
             if a.hub.is_playing() {
@@ -1081,6 +1101,233 @@ fn page_app_picker(a: &App, ca: f32, hits: &mut Vec<Hit>) {
         let hgt = track.h * PICK_ROWS as f32 / view.len() as f32;
         let y = track.y + (track.h - hgt) * a.app_scroll as f32 / (view.len() - PICK_ROWS) as f32;
         g.fill_rrect(Rect::new(track.x, y, 3.0, hgt), 1.5, Color::white(0.3 * ca));
+    }
+}
+
+// ----------------------------------------------------------------- radio ----
+
+// States are never told apart by red against green: each one has its own shape and words,
+// and the colours differ in brightness (amber and blue against grey).
+/// Problems: an amber warning triangle beside the words.
+const C_WARN: Color = Color(1.0, 0.74, 0.26, 1.0);
+/// Playing: blue level bars beside the word "Playing".
+const C_LIVE: Color = Color(0.36, 0.66, 1.0, 1.0);
+
+/// The Radio tab icon, drawn from plain shapes: a small set with a speaker, a dial and an aerial.
+fn radio_glyph(g: &Gfx, cx: f32, cy: f32, col: Color) {
+    let body = Rect::new(cx - 8.5, cy - 3.0, 17.0, 11.0);
+    g.stroke_rrect(body, 2.5, col, 1.4);
+    g.fill_circle(cx - 3.8, cy + 2.5, 2.4, col);
+    g.line((cx + 1.2, cy + 0.6), (cx + 5.4, cy + 0.6), 1.2, col);
+    g.line((cx + 1.2, cy + 4.2), (cx + 5.4, cy + 4.2), 1.2, col);
+    g.line((cx - 5.0, cy - 3.0), (cx + 4.5, cy - 8.0), 1.3, col);
+    g.fill_circle(cx + 4.8, cy - 8.2, 1.2, col);
+}
+
+/// An amber triangle with an exclamation mark (problems).
+fn warn_glyph(g: &Gfx, cx: f32, cy: f32, s: f32, col: Color, ca: f32) {
+    g.fill_poly(&[(cx, cy - s * 0.55), (cx + s * 0.6, cy + s * 0.48), (cx - s * 0.6, cy + s * 0.48)], col.fade(ca));
+    g.line((cx, cy - s * 0.18), (cx, cy + s * 0.14), (s * 0.13).max(1.2), BLACK.fade(ca));
+    g.fill_circle(cx, cy + s * 0.31, (s * 0.07).max(0.8), BLACK.fade(ca));
+}
+
+/// Three level bars (playing).
+fn live_glyph(g: &Gfx, x: f32, cy: f32, col: Color, ca: f32) {
+    for (i, h) in [6.0f32, 10.0, 7.5].iter().enumerate() {
+        g.fill_rrect(Rect::new(x + i as f32 * 3.6, cy + 5.0 - h, 2.4, *h), 1.0, col.fade(ca));
+    }
+}
+
+/// Three dots (connecting, buffering).
+fn wait_glyph(g: &Gfx, x: f32, cy: f32, col: Color, ca: f32) {
+    for i in 0..3 {
+        g.fill_circle(x + 1.5 + i as f32 * 4.0, cy, 1.4, col.fade(ca));
+    }
+}
+
+/// "MP3 · 128 kbps", "HLS", "AAC".
+fn codec_text(st: &crate::tuner::Station) -> String {
+    let c = st.codec_label();
+    match (c.is_empty(), st.bitrate_label()) {
+        (false, Some(b)) => format!("{c} \u{00B7} {b}"),
+        (true, Some(b)) => b,
+        _ => c,
+    }
+}
+
+fn page_radio(a: &App, ca: f32, hits: &mut Vec<Hit>) {
+    let g = &a.gfx;
+    let f = &g.fonts;
+    let rad = &a.rad;
+
+    // ---- now playing strip: play/stop, the station, and a status line with its own shape
+    let strip = Rect::new(24.0, 0.0, EXP_W - 48.0, 46.0);
+    g.fill_rrect(strip, 16.0, SURF.fade(ca));
+    let btn = Rect::new(strip.x + 7.0, strip.y + 6.0, 34.0, 34.0);
+    let playing = rad.active() && rad.status != RStatus::Paused;
+    if rad.now.is_some() {
+        hits.push(Hit { r: btn, act: Act::RadioToggle });
+        let k = if hot(a, Act::RadioToggle) { 1.0 } else { 0.9 };
+        g.fill_circle(btn.cx(), btn.cy(), 16.0, Color::white(k * ca));
+        g.icon(if playing { '\u{E71A}' } else { '\u{E768}' }, btn, &f.icon14, BLACK.fade(ca));
+    } else {
+        g.fill_circle(btn.cx(), btn.cy(), 16.0, Color::white(0.10 * ca));
+        g.icon('\u{E768}', btn, &f.icon14, T3.fade(ca));
+    }
+    let tx = strip.x + 52.0;
+    let tw = strip.w - 60.0;
+    let name = rad.now.as_ref().map_or("Radio", |s| s.name.as_str());
+    g.text(name, Rect::new(tx, strip.y + 4.0, tw, 22.0), &f.body, (if rad.now.is_some() { T1 } else { T2 }).fade(ca), Align::Left);
+    let line = Rect::new(tx + 16.0, strip.y + 25.0, tw - 16.0, 17.0);
+    let gy = line.cy();
+    match &rad.status {
+        RStatus::Error(e) => {
+            warn_glyph(g, tx + 5.5, gy, 11.0, C_WARN, ca);
+            g.text(e, line, &f.tiny, C_WARN.fade(ca), Align::Left);
+        }
+        RStatus::Playing => {
+            live_glyph(g, tx, gy, C_LIVE, ca);
+            let mut t = String::from("Playing");
+            if let Some(s) = &rad.now {
+                for part in [s.countrycode.clone(), codec_text(s)] {
+                    if !part.is_empty() {
+                        t.push_str(&format!("  \u{00B7}  {part}"));
+                    }
+                }
+            }
+            g.text(&t, line, &f.tiny, T2.fade(ca), Align::Left);
+        }
+        RStatus::Connecting | RStatus::Buffering => {
+            wait_glyph(g, tx, gy, T2, ca);
+            let t = if rad.status == RStatus::Connecting { "Connecting..." } else { "Buffering..." };
+            g.text(t, line, &f.tiny, T2.fade(ca), Align::Left);
+        }
+        RStatus::Paused => {
+            for dx in [1.0f32, 5.5] {
+                g.fill_rrect(Rect::new(tx + dx, gy - 4.5, 2.6, 9.0), 1.0, T2.fade(ca));
+            }
+            g.text("Paused", line, &f.tiny, T2.fade(ca), Align::Left);
+        }
+        RStatus::Idle if rad.now.is_some() => {
+            g.fill_rrect(Rect::new(tx + 1.0, gy - 4.0, 8.0, 8.0), 1.5, T3.fade(ca));
+            g.text("Stopped", line, &f.tiny, T3.fade(ca), Align::Left);
+        }
+        RStatus::Idle => {
+            g.text("Pick a station below to play it", Rect::new(tx, line.y, tw, line.h), &f.tiny, T3.fade(ca), Align::Left);
+        }
+    }
+
+    // ---- list switcher: Top / Search / Favorites (the shown one is brighter and filled)
+    let y = 54.0;
+    let top_label = match &rad.country {
+        Some(cc) => format!("Top {cc}"),
+        None => "Top".to_string(),
+    };
+    let fav_label = if rad.favs.is_empty() { "Favorites".to_string() } else { format!("Favorites {}", rad.favs.len()) };
+    let mut x = 24.0;
+    for (list, label, w) in [(RList::Top, top_label, 66.0), (RList::Search, "Search".to_string(), 66.0), (RList::Favs, fav_label, 96.0)] {
+        let r = Rect::new(x, y, w, 26.0);
+        let act = Act::RadioList(list);
+        hits.push(Hit { r, act });
+        let on = rad.list == list;
+        let k = hot_k(a, act);
+        g.fill_rrect(r, 13.0, Color::white((if on { 0.16 } else { 0.07 * k }) * ca));
+        g.text(&label, r, &f.small, (if on { T1 } else { mix(T3, T2, k) }).fade(ca), Align::Center);
+        x += w + 6.0;
+    }
+    // search box: click, type, Enter searches
+    let sr = Rect::new(EXP_W - 24.0 - 262.0, y, 262.0, 26.0);
+    let typing = a.entry_search && a.page == Page::Radio;
+    hits.push(Hit { r: sr, act: Act::RadioSearch });
+    if typing || !rad.query.is_empty() {
+        let mut t = rad.query.clone();
+        if typing {
+            t.push('\u{2502}');
+        }
+        g.fill_rrect(sr, 13.0, Color::white(0.14 * ca));
+        g.text(&t, Rect::new(sr.x + 12.0, sr.y, sr.w - 40.0, sr.h), &f.small, T1.fade(ca), Align::Left);
+        if !typing {
+            let xr = Rect::new(sr.x + sr.w - 26.0, sr.y, 26.0, sr.h);
+            hits.push(Hit { r: xr, act: Act::RadioSearchClear });
+            g.icon('\u{E711}', xr, &f.icon14, (if hot(a, Act::RadioSearchClear) { T1 } else { T2 }).fade(ca));
+        }
+    } else {
+        g.fill_rrect(sr, 13.0, Color::white((if hot(a, Act::RadioSearch) { 0.12 } else { 0.07 }) * ca));
+        g.icon('\u{E721}', Rect::new(sr.x + 6.0, sr.y, 24.0, sr.h), &f.icon14, T3.fade(ca));
+        g.text("Name, genre, or country code like DE", Rect::new(sr.x + 32.0, sr.y, sr.w - 38.0, sr.h), &f.small, T3.fade(ca), Align::Left);
+    }
+
+    // ---- the list
+    let list = Rect::new(24.0, 88.0, EXP_W - 48.0, RADIO_ROWS as f32 * 29.0);
+    let mid = |l1: &str, l2: &str| {
+        g.text(l1, Rect::new(0.0, list.y + 22.0, EXP_W, 22.0), &f.body, T2.fade(ca), Align::Center);
+        g.text(l2, Rect::new(0.0, list.y + 46.0, EXP_W, 20.0), &f.small, T3.fade(ca), Align::Center);
+    };
+    if rad.loading() {
+        spinner(g, EXP_W / 2.0, list.y + 34.0, 14.0, a.spin_t, a.accent, ca);
+        g.text("Loading stations\u{2026}", Rect::new(0.0, list.y + 60.0, EXP_W, 20.0), &f.small, T2.fade(ca), Align::Center);
+        return;
+    }
+    if rad.failed() {
+        let msg = "Station list unavailable, try again later";
+        let w = 290.0;
+        warn_glyph(g, EXP_W / 2.0 - w / 2.0 + 8.0, list.y + 27.0, 14.0, C_WARN, ca);
+        g.text(msg, Rect::new(EXP_W / 2.0 - w / 2.0 + 22.0, list.y + 16.0, w, 22.0), &f.body, C_WARN.fade(ca), Align::Left);
+        let r = Rect::new(EXP_W / 2.0 - 55.0, list.y + 52.0, 110.0, 28.0);
+        hits.push(Hit { r, act: Act::RadioRetry });
+        g.fill_rrect(r, 14.0, Color::white((if hot(a, Act::RadioRetry) { 1.0 } else { 0.92 }) * ca));
+        g.text("Try again", r, &f.small, BLACK.fade(ca), Align::Center);
+        return;
+    }
+    let view = rad.view();
+    if view.is_empty() {
+        match rad.list {
+            RList::Search if rad.searched.is_empty() => mid("Search the world's radio stations", "Type a name, a genre like jazz, or a country code like DE, then press Enter"),
+            RList::Search => mid(&format!("No stations found for \u{201C}{}\u{201D}", rad.searched), "Try another name, a genre, or a two-letter country code"),
+            RList::Favs => mid("No favorites yet", "Click the star on a station to keep it here"),
+            RList::Top => mid("No stations found", "Try a search instead"),
+        }
+        return;
+    }
+    for row in 0..RADIO_ROWS {
+        let idx = rad.scroll + row;
+        let Some(st) = view.get(idx) else { break };
+        let r = Rect::new(list.x, list.y + row as f32 * 29.0, list.w - 10.0, 27.0);
+        let act = Act::RadioPlay(idx);
+        let sact = Act::RadioStar(idx);
+        hits.push(Hit { r, act });
+        let star = Rect::new(r.x + r.w - 32.0, r.y, 30.0, r.h);
+        hits.push(Hit { r: star, act: sact });
+        let now = rad.is_now(st);
+        let over = hot(a, act) || hot(a, sact);
+        let bg = if now { a.accent.fade(0.18) } else if over { Color::white(0.12) } else if row % 2 == 0 { Color::white(0.05) } else { Color::white(0.0) };
+        g.fill_rrect(r, 10.0, bg.fade(ca));
+        // left: level bars on the station playing, a play triangle on the one under the pointer
+        let (gx, gy) = (r.x + 10.0, r.cy());
+        if now {
+            live_glyph(g, gx, gy, C_LIVE, ca);
+        } else if hot(a, act) {
+            g.fill_poly(&[(gx, gy - 5.0), (gx + 8.5, gy), (gx, gy + 5.0)], T1.fade(ca));
+        }
+        g.text(&st.name, Rect::new(r.x + 30.0, r.y, r.w - 30.0 - 200.0, r.h), &f.body, T1.fade(ca), Align::Left);
+        g.text(&st.countrycode, Rect::new(r.x + r.w - 196.0, r.y, 30.0, r.h), &f.tiny, T2.fade(ca), Align::Center);
+        g.text(&codec_text(st), Rect::new(r.x + r.w - 160.0, r.y, 124.0, r.h), &f.tiny, T3.fade(ca), Align::Left);
+        // a filled star for favorites, an outline for the rest
+        let (glyph, col, alpha) = if rad.is_fav(st) {
+            ('\u{E735}', C_GOLD, 1.0)
+        } else if hot(a, sact) {
+            ('\u{E734}', T1, 1.0)
+        } else {
+            ('\u{E734}', T3, if over { 1.0 } else { 0.6 })
+        };
+        g.icon(glyph, star, &f.icon14, col.fade(ca * alpha));
+    }
+    if view.len() > RADIO_ROWS {
+        let track = Rect::new(list.x + list.w - 5.0, list.y, 3.0, RADIO_ROWS as f32 * 29.0 - 2.0);
+        g.fill_rrect(track, 1.5, Color::white(0.08 * ca));
+        let hgt = (track.h * RADIO_ROWS as f32 / view.len() as f32).max(14.0);
+        let yy = track.y + (track.h - hgt) * rad.scroll as f32 / (view.len() - RADIO_ROWS) as f32;
+        g.fill_rrect(Rect::new(track.x, yy, 3.0, hgt), 1.5, Color::white(0.3 * ca));
     }
 }
 
