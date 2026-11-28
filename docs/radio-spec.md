@@ -1,4 +1,6 @@
-# Nock Radio: spec v1.5
+# Nock Radio: spec v1.6
+
+Changed in v1.6 (after T4b): restores criterion 14 (lost by mistake in v1.5), one automatic restart after a failed network recovery.
 
 Changed in v1.5 (after T4): criterion 12 split into a local network drop (event driven, "No network") and a station drop (Buffering timer); a silent station with no event is a known v1 gap.
 
@@ -84,5 +86,6 @@ Out of scope for v1: song titles from the stream (ICY metadata), recently played
 9. `cargo build --release`, `cargo test`, `cargo clippy` pass. The preview test renders the Radio tab. (`cargo clippy` fails on upstream main at `src/games.rs:554`, `6.28` as approx_constant. The Engineer may fix that one line with `std::f32::consts::TAU` or similar, in its own commit.)
 10. `radio=0` hides the tab.
 11. A station that never answers shows "Station not responding" within about 10 s.
-12. **Network drop.** (a) When Windows reports the PC has lost its network while radio plays, the strip shows "No network" (amber, with a shape) within about 5 s of that report. The player is kept alive. When the network returns and audio resumes on its own, the strip goes back to "Playing". If audio has not resumed 15 s after the network returns, show "Connection lost". Use a Windows network-change event (reuse one Nock already listens to if there is one), never polling. (b) **Station drop.** A stream that enters Buffering after it opened shows "Connection lost" 15 s later, or at once if the server hangs up (T4 proved this with a local relay). (c) Known v1 gap: a station that goes silent with the network fine and the player still reporting Playing is not detected.
+12. **Network drop.** (a) When Windows reports the PC has lost its network while radio plays, the strip shows "No network" (amber, with a shape) within about 5 s of that report. The player is kept alive. When the network returns and audio resumes on its own, the strip goes back to "Playing". If audio has not resumed 15 s after the network returns, restart the same station once automatically (strip: "Reconnecting..."). Only if that restart also fails, by the normal play rules (connect timeout, MediaFailed), show "Connection lost". Never more than one automatic restart per drop. Use a Windows network-change event (reuse one Nock already listens to if there is one), never polling. (b) **Station drop.** A stream that enters Buffering after it opened shows "Connection lost" 15 s later, or at once if the server hangs up (T4 proved this with a local relay). (c) Known v1 gap: a station that goes silent with the network fine and the player still reporting Playing is not detected.
 13. Pressing Stop never freezes the panel (no visible hitch).
+14. Nock's Media card shows no duration or progress for a live radio stream. Treat a duration over 24 h, or no duration, as live. Tracks with a real length still show their time.
